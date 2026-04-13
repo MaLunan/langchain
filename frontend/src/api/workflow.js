@@ -1,0 +1,62 @@
+/**
+ * 封装所有后端 workflow API 调用。
+ * 所有请求通过 vite proxy 转发到 http://127.0.0.1:8000
+ */
+
+const BASE = ''  // vite proxy 已转发，无需前缀
+
+async function request(method, path, body) {
+  const opts = {
+    method,
+    headers: body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
+    body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+  }
+  const res = await fetch(BASE + path, opts)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
+/** 步骤 0：上传视频文件，返回服务器路径 */
+export async function uploadVideo(file) {
+  const form = new FormData()
+  form.append('file', file)
+  return request('POST', '/workflow/upload', form)
+}
+
+/** 步骤 1：提交 URL 或文件路径，提取文本 */
+export async function startWorkflow(source) {
+  return request('POST', '/workflow/start', { source })
+}
+
+/** 查询所有可用改写风格 */
+export async function fetchRewriteStyles() {
+  return request('GET', '/rewrite-styles')
+}
+
+/** 步骤 2：改写文本 */
+export async function rewriteText(sessionId, styleId) {
+  return request('POST', `/workflow/${sessionId}/rewrite`, { style_id: styleId })
+}
+
+/** 步骤 3：确认文本 */
+export async function confirmText(sessionId, finalText) {
+  return request('POST', `/workflow/${sessionId}/confirm`, { final_text: finalText })
+}
+
+/** 步骤 4a：生成 TTS 音频 */
+export async function generateAudio(sessionId) {
+  return request('POST', `/workflow/${sessionId}/audio`)
+}
+
+/** 步骤 4b：生成数字人视频 */
+export async function generateVideo(sessionId) {
+  return request('POST', `/workflow/${sessionId}/video`)
+}
+
+/** 查询工作流状态 */
+export async function getStatus(sessionId) {
+  return request('GET', `/workflow/${sessionId}/status`)
+}

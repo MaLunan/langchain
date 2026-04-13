@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: langchain-kimi-rag-chat
+Version: 0.1.0
+Summary: Kimi(Moonshot) + 多轮记忆 + 本地文档 RAG 入门示例
+Requires-Python: >=3.10
+Requires-Dist: langchain>=0.3.14
+Requires-Dist: langchain-core>=0.3.14
+Requires-Dist: langchain-community>=0.3.14
+Requires-Dist: langchain-openai>=0.3.0
+Requires-Dist: langchain-text-splitters>=0.3.0
+Requires-Dist: python-dotenv>=1.0.1
+Requires-Dist: faiss-cpu>=1.8.0
+Requires-Dist: sentence-transformers>=3.0.0
+Requires-Dist: langchain-huggingface>=0.1.2
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: uvicorn[standard]>=0.32.0
+Requires-Dist: duckduckgo-search>=7.0.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: beautifulsoup4>=4.12.0
+Requires-Dist: lxml>=5.0.0
+Requires-Dist: moviepy>=1.0.3
+Requires-Dist: SpeechRecognition>=3.10.0
+Requires-Dist: edge-tts>=6.1.0
+Requires-Dist: aiofiles>=23.2.0
