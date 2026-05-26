@@ -84,3 +84,51 @@ def _poll_task(task_id: str, timeout: int = 300) -> str:
         time.sleep(5)
 
     raise TimeoutError(f"轮询超时（{timeout}s），task_id={task_id}")
+
+
+# ── 模式 A：数字人口播 ─────────────────────────────────────────────────────
+
+def generate_avatar_video(
+    audio_path: Path,
+    avatar_id: Optional[str] = None,
+    timeout: int = 300,
+) -> str:
+    """
+    上传音频至可灵，生成数字人口播视频。
+
+    avatar_id 默认读取环境变量 KLING_AVATAR_ID。
+    返回可访问的视频 URL。
+    """
+    ak, sk = _get_credentials()
+    if avatar_id is None:
+        avatar_id = os.getenv("KLING_AVATAR_ID", "").strip()
+    if not avatar_id:
+        raise ValueError("未配置 KLING_AVATAR_ID，或未传入 avatar_id")
+
+    # Step 1: 上传音频，获取 audio_url
+    upload_url = f"{_BASE_URL}/v1/audios"
+    with open(audio_path, "rb") as f:
+        upload_resp = requests.post(
+            upload_url,
+            headers={"Authorization": f"Bearer {_make_jwt(ak, sk)}"},
+            files={"file": (audio_path.name, f, "audio/mpeg")},
+            timeout=60,
+        )
+    upload_resp.raise_for_status()
+    audio_url = upload_resp.json().get("data", {}).get("url", "")
+    if not audio_url:
+        raise RuntimeError(f"音频上传失败：{upload_resp.text}")
+
+    # Step 2: 提交 lip-sync 任务
+    task_resp = requests.post(
+        f"{_BASE_URL}/v1/videos/lip-sync",
+        headers=_auth_headers(ak, sk),
+        json={"avatar_id": avatar_id, "audio_url": audio_url},
+        timeout=30,
+    )
+    task_resp.raise_for_status()
+    task_id = task_resp.json().get("data", {}).get("task_id", "")
+    if not task_id:
+        raise RuntimeError(f"任务提交失败：{task_resp.text}")
+
+    return _poll_task(task_id, timeout=timeout)
