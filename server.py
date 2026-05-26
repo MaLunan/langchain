@@ -181,6 +181,14 @@ class VideoResponse(BaseModel):
     video_url: str
 
 
+class VideoRequest(BaseModel):
+    mode: str = Field(
+        ...,
+        description="生成模式：avatar（数字人口播）或 text2video（文生视频）",
+        pattern="^(avatar|text2video)$",
+    )
+
+
 class WorkflowStatusResponse(BaseModel):
     session_id: str
     current_step: str
@@ -297,25 +305,47 @@ def workflow_audio(session_id: str, request: Request):
 
 
 @app.post("/workflow/{session_id}/video", response_model=VideoResponse, tags=["workflow"])
-def workflow_video(session_id: str, request: Request):
-    """步骤 4b：调用火山引擎数字人 API 生成视频，返回视频 URL。"""
-    from digital_human_service import generate_digital_human_video
+def workflow_video(session_id: str, body: VideoRequest, request: Request):
+    """
+    步骤 5：生成视频。
+
+    mode=avatar     先必须调用 /audio，用音频驱动数字人口播（可灵 lip-sync）。
+    mode=text2video 直接用 final_text 调用可灵文生视频，无需先生成音频。
+    """
+    from kling_service import generate_avatar_video, generate_text_to_video
 
     state = _get_state(request, session_id)
-    if not state.audio_path:
-        raise HTTPException(status_code=409, detail="请先生成音频（POST /workflow/{id}/audio）。")
 
-    audio_path = Path(state.audio_path)
-    if not audio_path.exists():
-        raise HTTPException(status_code=500, detail=f"音频文件不存在：{audio_path}")
+    if body.mode == "avatar":
+        if not state.audio_path:
+            raise HTTPException(
+                status_code=409,
+                detail="mode=avatar 需要先生成音频（POST /workflow/{id}/audio）。",
+            )
+        audio_path = Path(state.audio_path)
+        if not audio_path.exists():
+            raise HTTPException(status_code=500, detail=f"音频文件不存在：{audio_path}")
+        try:
+            video_url = generate_avatar_video(audio_path)
+        except EnvironmentError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"数字人视频生成失败：{e}") from e
 
-    try:
-        video_url = generate_digital_human_video(audio_path)
-    except EnvironmentError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"数字人视频生成失败：{e}") from e
+    else:  # text2video
+        if not state.final_text:
+            raise HTTPException(
+                status_code=409,
+                detail="请先确认文本（POST /workflow/{id}/confirm）。",
+            )
+        try:
+            video_url = generate_text_to_video(state.final_text)
+        except EnvironmentError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"文生视频生成失败：{e}") from e
 
+    state.video_mode = body.mode
     state.video_url = video_url
     state.current_step = WorkflowStep.VIDEO_DONE
     return VideoResponse(session_id=session_id, video_url=video_url)
