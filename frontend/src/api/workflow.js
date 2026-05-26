@@ -27,13 +27,18 @@ export async function uploadVideo(file) {
 }
 
 /** 步骤 1：提交 URL 或文件路径，提取文本 */
-export async function startWorkflow(source) {
-  return request('POST', '/workflow/start', { source })
+export async function startWorkflow(source = '', rawText = '') {
+  return request('POST', '/workflow/start', { source, raw_text: rawText })
 }
 
 /** 查询所有可用改写风格 */
 export async function fetchRewriteStyles() {
   return request('GET', '/rewrite-styles')
+}
+
+/** 查询最近的工作流任务 */
+export async function listSessions(limit = 50) {
+  return request('GET', `/workflow/sessions?limit=${limit}`)
 }
 
 /** 步骤 2：改写文本 */
@@ -51,13 +56,16 @@ export async function generateAudio(sessionId) {
   return request('POST', `/workflow/${sessionId}/audio`)
 }
 
-/** 步骤 5：生成视频
- * @param {string} sessionId
- * @param {'avatar'|'text2video'} mode
- * @param {object} params  文生视频额外参数（duration、aspect_ratio）
- */
-export async function generateVideo(sessionId, mode, params = {}) {
-  return request('POST', `/workflow/${sessionId}/video`, { mode, ...params })
+/** 步骤 4b：上传数字人参考图 */
+export async function uploadAvatarImage(sessionId, file) {
+  const form = new FormData()
+  form.append('file', file)
+  return request('POST', `/workflow/${sessionId}/avatar-image`, form)
+}
+
+/** 步骤 5：异步提交数字人口播视频任务 */
+export async function generateVideo(sessionId) {
+  return request('POST', `/workflow/${sessionId}/video`, { mode: 'avatar' })
 }
 
 /** 查询工作流状态 */

@@ -4,8 +4,36 @@
     <div style="text-align:center;padding:32px 0 8px">
       <h1 style="font-size:24px;font-weight:800;color:#1a1a2e">数字人内容生成工作流</h1>
       <p style="color:#888;font-size:13px;margin-top:6px">
-        提取文本 → AI 改写 → 生成语音 → 数字人视频
+        按顺序完成内容、文本、形象语音和数字人口播视频生成
       </p>
+    </div>
+
+    <div class="task-picker">
+      <label>任务 ID</label>
+      <select
+        v-model="selectedSessionId"
+        :disabled="sessionLoading || !taskSessions.length"
+        @change="loadSelectedSession"
+      >
+        <option value="">选择历史任务</option>
+        <option
+          v-for="task in taskSessions"
+          :key="task.session_id"
+          :value="task.session_id"
+        >
+          {{ formatTaskOption(task) }}
+        </option>
+      </select>
+      <button class="btn btn-outline" :disabled="sessionLoading" @click="refreshSessions">
+        刷新
+      </button>
+      <button
+        class="btn btn-primary"
+        :disabled="sessionLoading || !selectedSessionId"
+        @click="loadSelectedSession"
+      >
+        {{ sessionLoading ? '读取中…' : '打开任务' }}
+      </button>
     </div>
 
     <!-- 步骤指示器 -->
@@ -14,15 +42,25 @@
         v-for="(s, i) in STEPS"
         :key="s.key"
         class="step-item"
-        :class="{ active: currentStep === i, done: isStepDone(i) }"
+        :class="{
+          active: currentStep === i,
+          done: isStepDone(i),
+          clickable: canVisitStep(i),
+          locked: !canVisitStep(i),
+        }"
+        :title="getStepHint(i)"
+        @click="goToStep(i)"
       >
         <div class="step-dot">
-          <span v-if="currentStep > i">✓</span>
+          <span v-if="isStepDone(i)">✓</span>
           <span v-else>{{ i + 1 }}</span>
         </div>
         <div class="step-label">{{ s.label }}</div>
       </div>
     </div>
+    <p class="stepper-tip">
+      需要从第一步开始按顺序完成；可返回已完成步骤查看或修改。
+    </p>
 
     <!-- 错误提示 -->
     <div v-if="error" class="alert alert-error">
@@ -124,6 +162,7 @@
 
       <div class="btn-row">
         <button class="btn btn-outline" @click="currentStep = 0">← 重新提取</button>
+        <button class="btn btn-outline" @click="goToStep(2)">直接确认文本</button>
         <button
           class="btn btn-primary"
           :disabled="loading || !selectedStyle"
@@ -143,7 +182,7 @@
       </div>
 
       <div class="input-group">
-        <label>改写结果（可直接编辑修改）</label>
+        <label>待确认文本（可直接确认或先编辑修改）</label>
         <textarea
           v-model="editableText"
           class="result-box editable"
@@ -165,69 +204,26 @@
       </div>
     </div>
 
-    <!-- ── 步骤 3：选择模式 ──────────────────────────── -->
+    <!-- ── 步骤 3：准备形象与语音 ────────────────── -->
     <div v-if="currentStep === 3" class="card">
       <div class="card-title">
-        <span>🎯 选择生成方式</span>
+        <span>🖼️ 准备形象与语音</span>
         <span class="badge">步骤 4</span>
       </div>
 
-      <div class="mode-grid">
-        <div
-          class="mode-card"
-          :class="{ selected: videoMode === 'avatar' }"
-          @click="videoMode = 'avatar'"
-        >
-          <div class="mode-icon">🎙️</div>
-          <div class="mode-title">数字人口播</div>
-          <div class="mode-desc">生成 TTS 音频，再驱动数字人对嘴播报</div>
+      <div class="input-group">
+        <label>数字人参考图</label>
+        <div class="upload-area" @click="$refs.avatarImageInput.click()">
+          <input ref="avatarImageInput" type="file" accept="image/png,image/jpeg,image/webp" @change="onAvatarImageChange" />
+          <template v-if="avatarPreviewUrl">
+            <img :src="avatarPreviewUrl" alt="avatar preview" class="avatar-preview" />
+            <div class="upload-name">{{ avatarImageFile ? avatarImageFile.name : '已选择图片' }}</div>
+          </template>
+          <template v-else>
+            <div class="upload-icon">🖼️</div>
+            <p>点击上传人物图片<br><small>支持 PNG / JPG / JPEG / WebP</small></p>
+          </template>
         </div>
-        <div
-          class="mode-card"
-          :class="{ selected: videoMode === 'text2video' }"
-          @click="videoMode = 'text2video'"
-        >
-          <div class="mode-icon">🎬</div>
-          <div class="mode-title">文生视频</div>
-          <div class="mode-desc">直接将文字交给可灵 AI 生成视频，无需音频</div>
-        </div>
-      </div>
-
-      <template v-if="videoMode === 'text2video'">
-        <div class="input-group" style="margin-top:16px">
-          <label>视频时长</label>
-          <div class="tabs" style="width:fit-content">
-            <button class="tab-btn" :class="{ active: t2vDuration === 5 }" @click="t2vDuration = 5">5 秒</button>
-            <button class="tab-btn" :class="{ active: t2vDuration === 10 }" @click="t2vDuration = 10">10 秒</button>
-          </div>
-        </div>
-        <div class="input-group">
-          <label>画面比例</label>
-          <div class="tabs" style="width:fit-content">
-            <button class="tab-btn" :class="{ active: t2vAspectRatio === '16:9' }" @click="t2vAspectRatio = '16:9'">16:9</button>
-            <button class="tab-btn" :class="{ active: t2vAspectRatio === '9:16' }" @click="t2vAspectRatio = '9:16'">9:16</button>
-            <button class="tab-btn" :class="{ active: t2vAspectRatio === '1:1' }" @click="t2vAspectRatio = '1:1'">1:1</button>
-          </div>
-        </div>
-      </template>
-
-      <div class="btn-row">
-        <button class="btn btn-outline" @click="currentStep = 2">← 修改文本</button>
-        <button
-          class="btn btn-primary"
-          :disabled="!videoMode"
-          @click="handleModeSelect"
-        >
-          下一步 →
-        </button>
-      </div>
-    </div>
-
-    <!-- ── 步骤 4：生成音频（仅 Mode A）───────────────── -->
-    <div v-if="currentStep === 4" class="card">
-      <div class="card-title">
-        <span>🔊 生成语音</span>
-        <span class="badge">步骤 5</span>
       </div>
 
       <div class="input-group">
@@ -241,45 +237,63 @@
       </template>
 
       <div class="btn-row">
-        <button class="btn btn-outline" @click="currentStep = 3">← 重新选择</button>
+        <button class="btn btn-outline" @click="currentStep = 2">← 修改文本</button>
         <button v-if="!audioUrl" class="btn btn-primary" :disabled="loading" @click="handleAudio">
           <span v-if="loading" class="spinner"></span>
           <span>{{ loading ? '生成中…' : '生成语音' }}</span>
         </button>
-        <button v-if="audioUrl" class="btn btn-primary" @click="currentStep = 5">
-          下一步：生成视频 →
+        <button v-if="audioUrl" class="btn btn-primary" :disabled="loading" @click="proceedToVideoStep">
+          <span v-if="loading" class="spinner"></span>
+          <span>{{ loading ? '保存图片中…' : '下一步：生成视频 →' }}</span>
         </button>
       </div>
     </div>
 
     <!-- ── 步骤 5：生成视频 ───────────────────────────── -->
-    <div v-if="currentStep === 5" class="card">
+    <div v-if="currentStep === 4" class="card">
       <div class="card-title">
-        <span>{{ videoMode === 'avatar' ? '🤖 数字人视频' : '🎬 文生视频' }}</span>
-        <span class="badge">步骤 6</span>
+        <span>🤖 数字人口播视频</span>
+        <span class="badge">步骤 5</span>
       </div>
 
       <template v-if="videoUrl">
         <div class="alert alert-success">🎉 视频生成成功！</div>
-        <a :href="videoUrl" target="_blank" class="video-link">🎬 点击查看 / 下载视频</a>
+        <video
+          class="video-preview"
+          :src="videoUrl"
+          controls
+          playsinline
+          preload="metadata"
+        ></video>
+        <a :href="videoUrl" target="_blank" rel="noopener" class="video-link">
+          🎬 新窗口打开 / 下载视频
+        </a>
       </template>
       <template v-else>
-        <div class="alert alert-info">
-          ⚡ {{ videoMode === 'avatar' ? '数字人口播' : '文生视频' }}生成通常需要 1-3 分钟，请耐心等待。
+        <div v-if="videoStatus === 'queued' || videoStatus === 'processing'" class="alert alert-info">
+          ⏳ 视频正在后台生成，页面会自动刷新结果，可以先保持页面打开。
         </div>
-        <div v-if="videoMode === 'text2video'" class="alert alert-info" style="margin-top:0">
-          📝 时长：{{ t2vDuration }}s　比例：{{ t2vAspectRatio }}
+        <div v-else-if="videoStatus === 'failed'" class="alert alert-error">
+          生成失败：{{ videoError || '可灵未返回明确错误' }}
+        </div>
+        <div class="alert alert-info">
+          ⚡ 数字人口播生成通常需要 1-3 分钟，提交任务后会异步处理，避免接口超时。
         </div>
         <div class="alert alert-info" style="margin-top:0">
-          ⚙️ 需要在 .env 中配置 KLING_ACCESS_KEY_ID / KLING_ACCESS_KEY_SECRET{{ videoMode === 'avatar' ? ' / KLING_AVATAR_ID' : '' }}
+          ⚙️ 需要在 .env 中配置 KLING_ACCESS_KEY_ID / KLING_ACCESS_KEY_SECRET
         </div>
       </template>
 
       <div class="btn-row">
-        <button class="btn btn-outline" @click="currentStep = videoMode === 'avatar' ? 4 : 3">← 返回</button>
-        <button v-if="!videoUrl" class="btn btn-primary" :disabled="loading" @click="handleVideo">
+        <button class="btn btn-outline" @click="currentStep = 3">← 返回</button>
+        <button
+          v-if="!videoUrl"
+          class="btn btn-primary"
+          :disabled="loading || videoStatus === 'queued' || videoStatus === 'processing'"
+          @click="handleVideo"
+        >
           <span v-if="loading" class="spinner"></span>
-          <span>{{ loading ? '生成中（请等待）…' : (videoMode === 'avatar' ? '生成数字人视频' : '文生视频') }}</span>
+          <span>{{ loading ? '提交中…' : (videoStatus === 'failed' ? '重新生成数字人视频' : '提交生成数字人视频') }}</span>
         </button>
         <button v-if="videoUrl" class="btn btn-success" @click="reset">🔄 重新开始</button>
       </div>
@@ -293,7 +307,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import {
   uploadVideo,
   startWorkflow,
@@ -301,24 +315,123 @@ import {
   rewriteText,
   confirmText,
   generateAudio,
+  uploadAvatarImage,
   generateVideo,
+  listSessions,
+  getStatus,
 } from './api/workflow.js'
 
 const STEPS = [
   { key: 'extract', label: '提取内容' },
   { key: 'rewrite', label: 'AI 改写' },
   { key: 'confirm', label: '确认文本' },
-  { key: 'mode',    label: '选择模式' },
-  { key: 'audio',   label: '生成语音' },
+  { key: 'audio',   label: '形象与语音' },
   { key: 'video',   label: '生成视频' },
 ]
 
 const STYLE_ICONS = { professional: '📋', casual: '💬', news: '📰' }
 
 function isStepDone(i) {
-  if (currentStep.value > i) return true
-  if (i === 4 && videoMode.value === 'text2video' && currentStep.value >= 5) return true
-  return false
+  switch (i) {
+    case 0:
+      return hasExtractedText()
+    case 1:
+      return Boolean(normalizeText(editableText.value) && normalizeText(editableText.value) !== normalizeText(extractedText.value))
+    case 2:
+      return Boolean(normalizeText(finalText.value))
+    case 3:
+      return Boolean(audioUrl.value) && hasAvatarImage()
+    case 4:
+      return Boolean(videoUrl.value)
+    default:
+      return false
+  }
+}
+
+function normalizeText(text) {
+  return (text || '').trim()
+}
+
+function getDraftText() {
+  return normalizeText(editableText.value) || normalizeText(finalText.value) || normalizeText(extractedText.value)
+}
+
+function hasExtractedText() {
+  return Boolean(sessionId.value && normalizeText(extractedText.value))
+}
+
+function hasAvatarImage() {
+  return Boolean(avatarImageFile.value || avatarImagePath.value)
+}
+
+function canVisitStep(i) {
+  switch (i) {
+    case 0:
+      return true
+    case 1:
+      return hasExtractedText()
+    case 2:
+      return hasExtractedText()
+    case 3:
+      return Boolean(normalizeText(finalText.value))
+    case 4:
+      return Boolean(videoUrl.value || (normalizeText(finalText.value) && audioUrl.value && hasAvatarImage()))
+    default:
+      return false
+  }
+}
+
+function getStepRequirement(i) {
+  switch (i) {
+    case 0:
+      return '提取内容或重新开始'
+    case 1:
+      return '可直接查看原文并发起 AI 改写'
+    case 2:
+      return '可直接编辑待确认文本'
+    case 3:
+      return '上传数字人图片并生成语音'
+    case 4:
+      return '生成视频时会检查文本、图片和音频'
+    default:
+      return ''
+  }
+}
+
+function getStepHint(i) {
+  return `进入「${STEPS[i].label}」：${getStepRequirement(i)}`
+}
+
+function seedEditableText() {
+  if (normalizeText(editableText.value)) return
+  editableText.value = normalizeText(finalText.value) || normalizeText(extractedText.value)
+}
+
+function clearDerivedMedia() {
+  audioUrl.value = ''
+  videoUrl.value = ''
+  videoStatus.value = ''
+  videoError.value = ''
+  stopVideoPolling()
+}
+
+function resetAvatarImage() {
+  if (avatarPreviewUrl.value && avatarPreviewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(avatarPreviewUrl.value)
+  }
+  avatarImageFile.value = null
+  avatarImagePath.value = ''
+  avatarPreviewUrl.value = ''
+}
+
+function goToStep(i) {
+  error.value = ''
+  if (!canVisitStep(i)) {
+    error.value = '请按顺序先完成前面的步骤。'
+    return
+  }
+  if (i >= 2) seedEditableText()
+  currentStep.value = i
 }
 
 // ── 状态 ────────────────────────────────────────────────
@@ -339,15 +452,36 @@ const editableText  = ref('')
 const finalText     = ref('')
 const audioUrl      = ref('')
 const videoUrl      = ref('')
-const videoMode      = ref('')
-const t2vDuration    = ref(5)
-const t2vAspectRatio = ref('16:9')
+const videoStatus   = ref('')
+const videoError    = ref('')
+const avatarImageFile = ref(null)
+const avatarImagePath = ref('')
+const avatarPreviewUrl = ref('')
+const taskSessions   = ref([])
+const selectedSessionId = ref('')
+const sessionLoading = ref(false)
+let restoringSession = false
+let videoPollTimer = null
 
 onMounted(async () => {
   try {
     rewriteStyles.value = await fetchRewriteStyles()
     if (rewriteStyles.value.length) selectedStyle.value = rewriteStyles.value[0].style_id
   } catch { /* 后端未启动时静默失败 */ }
+  await refreshSessions()
+})
+
+watch(editableText, (nextText) => {
+  const next = normalizeText(nextText)
+  const confirmed = normalizeText(finalText.value)
+  if (confirmed && next !== confirmed) {
+    finalText.value = ''
+    clearDerivedMedia()
+  }
+})
+
+onUnmounted(() => {
+  stopVideoPolling()
 })
 
 // ── 文件选择 ─────────────────────────────────────────────
@@ -358,6 +492,127 @@ function onDrop(e) {
   isDragOver.value = false
   const f = e.dataTransfer.files[0]
   if (f && f.type.startsWith('video/')) selectedFile.value = f
+}
+
+function onAvatarImageChange(e) {
+  const file = e.target.files[0] || null
+  if (avatarPreviewUrl.value && avatarPreviewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(avatarPreviewUrl.value)
+  }
+  avatarImageFile.value = file
+  avatarImagePath.value = ''
+  avatarPreviewUrl.value = file ? URL.createObjectURL(file) : ''
+  videoUrl.value = ''
+  videoStatus.value = ''
+  videoError.value = ''
+  stopVideoPolling()
+}
+
+function formatTaskOption(task) {
+  const done = task.video_url ? ' / 已生成视频' : ''
+  const preview = task.text_preview ? ` / ${task.text_preview}` : ''
+  return `${task.session_id}${done}${preview}`
+}
+
+function stepIndexFromStatus(status) {
+  switch (status.current_step) {
+    case 'video_done':
+    case 'video_pending':
+    case 'video_failed':
+      return 4
+    case 'audio_done':
+    case 'mode_selected':
+    case 'confirmed':
+      return 3
+    case 'rewritten':
+      return 2
+    case 'extracted':
+      return 1
+    default:
+      return 0
+  }
+}
+
+async function refreshSessions() {
+  try {
+    taskSessions.value = await listSessions()
+  } catch {
+    taskSessions.value = []
+  }
+}
+
+function applyWorkflowStatus(status) {
+  restoringSession = true
+  if (avatarPreviewUrl.value && avatarPreviewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(avatarPreviewUrl.value)
+  }
+  sessionId.value = status.session_id
+  selectedSessionId.value = status.session_id
+  extractedText.value = status.extracted_text || ''
+  editableText.value = status.final_text || status.rewritten_text || status.extracted_text || ''
+  finalText.value = status.final_text || ''
+  audioUrl.value = status.audio_url || ''
+  videoUrl.value = status.video_url || ''
+  videoStatus.value = status.video_status || (status.video_url ? 'succeed' : '')
+  videoError.value = status.video_error || ''
+  avatarPreviewUrl.value = status.avatar_image_url || ''
+  avatarImageFile.value = null
+  avatarImagePath.value = status.avatar_image_url || (status.avatar_image_ready ? 'saved' : '')
+  currentStep.value = stepIndexFromStatus(status)
+  setTimeout(() => {
+    restoringSession = false
+  }, 0)
+}
+
+async function loadSelectedSession() {
+  if (!selectedSessionId.value) return
+  error.value = ''
+  sessionLoading.value = true
+  try {
+    const status = await getStatus(selectedSessionId.value)
+    applyWorkflowStatus(status)
+    if (isVideoPendingStatus(status)) {
+      startVideoPolling()
+    } else {
+      stopVideoPolling()
+    }
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    sessionLoading.value = false
+  }
+}
+
+function isVideoPendingStatus(status) {
+  return status.video_status === 'queued' || status.video_status === 'processing'
+}
+
+function stopVideoPolling() {
+  if (videoPollTimer) {
+    clearInterval(videoPollTimer)
+    videoPollTimer = null
+  }
+}
+
+function startVideoPolling() {
+  stopVideoPolling()
+  if (!sessionId.value) return
+  videoPollTimer = setInterval(pollVideoStatus, 5000)
+}
+
+async function pollVideoStatus() {
+  if (!sessionId.value) return
+  try {
+    const status = await getStatus(sessionId.value)
+    applyWorkflowStatus(status)
+    if (!isVideoPendingStatus(status)) {
+      stopVideoPolling()
+      await refreshSessions()
+    }
+  } catch (e) {
+    error.value = e.message
+    stopVideoPolling()
+  }
 }
 
 // ── 步骤处理函数 ─────────────────────────────────────────
@@ -374,8 +629,14 @@ async function handleExtract() {
     }
     const res = await startWorkflow(source)
     sessionId.value    = res.session_id
+    selectedSessionId.value = res.session_id
     extractedText.value = res.extracted_text
+    editableText.value = res.extracted_text
+    finalText.value = ''
+    clearDerivedMedia()
+    resetAvatarImage()
     currentStep.value  = 1
+    await refreshSessions()
   } catch (e) {
     error.value = e.message
   } finally {
@@ -383,13 +644,27 @@ async function handleExtract() {
   }
 }
 
+async function ensureTextSession() {
+  if (!sessionId.value || !hasExtractedText()) {
+    throw new Error('请先从第一步提取内容创建会话。')
+  }
+  return sessionId.value
+}
+
 async function handleRewrite() {
   error.value = ''
+  if (!sessionId.value || !hasExtractedText()) {
+    error.value = '请先提取内容，再执行 AI 改写。'
+    return
+  }
   loading.value = true
   try {
     const res = await rewriteText(sessionId.value, selectedStyle.value)
     editableText.value = res.rewritten_text
+    finalText.value = ''
+    clearDerivedMedia()
     currentStep.value  = 2
+    await refreshSessions()
   } catch (e) {
     error.value = e.message
   } finally {
@@ -399,11 +674,23 @@ async function handleRewrite() {
 
 async function handleConfirm() {
   error.value = ''
+  const draftText = getDraftText()
+  if (!draftText) {
+    error.value = '没有可确认的文本，请先提取内容或输入文本。'
+    return
+  }
   loading.value = true
   try {
-    const res = await confirmText(sessionId.value, editableText.value)
+    await ensureTextSession()
+    const oldFinalText = normalizeText(finalText.value)
+    const res = await confirmText(sessionId.value, draftText)
+    if (oldFinalText && oldFinalText !== normalizeText(res.final_text)) {
+      clearDerivedMedia()
+    }
+    editableText.value = res.final_text
     finalText.value   = res.final_text
     currentStep.value = 3
+    await refreshSessions()
   } catch (e) {
     error.value = e.message
   } finally {
@@ -411,11 +698,74 @@ async function handleConfirm() {
   }
 }
 
-function handleModeSelect() {
-  if (videoMode.value === 'avatar') {
+async function ensureConfirmedText() {
+  seedEditableText()
+  await ensureTextSession()
+  const draftText = getDraftText()
+  if (!draftText) {
+    throw new Error('没有可用于继续流程的文本，请先提取内容或输入文本。')
+  }
+  if (normalizeText(finalText.value) === draftText) {
+    return finalText.value
+  }
+
+  const res = await confirmText(sessionId.value, draftText)
+  const nextFinalText = normalizeText(res.final_text)
+  if (normalizeText(finalText.value) && normalizeText(finalText.value) !== nextFinalText) {
+    clearDerivedMedia()
+  }
+  editableText.value = res.final_text
+  finalText.value = res.final_text
+  return res.final_text
+}
+
+async function ensureAvatarAudio() {
+  await ensureConfirmedText()
+  if (audioUrl.value) return audioUrl.value
+  const res = await generateAudio(sessionId.value)
+  audioUrl.value = res.audio_url
+  await refreshSessions()
+  return res.audio_url
+}
+
+async function ensureAvatarImageUploaded() {
+  if (!sessionId.value) {
+    throw new Error('请先提取内容创建会话，再继续后续步骤。')
+  }
+  if (avatarImagePath.value) return avatarImagePath.value
+  if (!avatarImageFile.value) {
+    throw new Error('请先上传一张数字人参考图。')
+  }
+  const res = await uploadAvatarImage(sessionId.value, avatarImageFile.value)
+  if (avatarPreviewUrl.value && avatarPreviewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(avatarPreviewUrl.value)
+  }
+  avatarImagePath.value = res.image_url || res.file_path
+  avatarPreviewUrl.value = res.image_url || avatarPreviewUrl.value
+  avatarImageFile.value = null
+  await refreshSessions()
+  return avatarImagePath.value
+}
+
+async function proceedToVideoStep() {
+  error.value = ''
+  if (!hasAvatarImage()) {
+    error.value = '请先上传数字人参考图，再继续生成视频。'
+    return
+  }
+  if (!audioUrl.value) {
+    error.value = '请先生成语音，再继续生成视频。'
+    return
+  }
+  loading.value = true
+  try {
+    await ensureAvatarImageUploaded()
     currentStep.value = 4
-  } else {
-    currentStep.value = 5
+    await refreshSessions()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    loading.value = false
   }
 }
 
@@ -423,8 +773,7 @@ async function handleAudio() {
   error.value = ''
   loading.value = true
   try {
-    const res = await generateAudio(sessionId.value)
-    audioUrl.value = res.audio_url
+    await ensureAvatarAudio()
   } catch (e) {
     error.value = e.message
   } finally {
@@ -436,11 +785,16 @@ async function handleVideo() {
   error.value = ''
   loading.value = true
   try {
-    const params = videoMode.value === 'text2video'
-      ? { duration: t2vDuration.value, aspect_ratio: t2vAspectRatio.value }
-      : {}
-    const res = await generateVideo(sessionId.value, videoMode.value, params)
-    videoUrl.value = res.video_url
+    await ensureAvatarAudio()
+    await ensureAvatarImageUploaded()
+    const res = await generateVideo(sessionId.value)
+    videoStatus.value = res.video_status || ''
+    videoError.value = res.video_error || ''
+    videoUrl.value = res.video_url || ''
+    if (videoStatus.value === 'queued' || videoStatus.value === 'processing') {
+      startVideoPolling()
+    }
+    await refreshSessions()
   } catch (e) {
     error.value = e.message
   } finally {
@@ -451,6 +805,7 @@ async function handleVideo() {
 function reset() {
   currentStep.value    = 0
   sessionId.value      = ''
+  selectedSessionId.value = ''
   urlInput.value       = ''
   selectedFile.value   = null
   extractedText.value  = ''
@@ -458,31 +813,10 @@ function reset() {
   finalText.value      = ''
   audioUrl.value       = ''
   videoUrl.value       = ''
-  videoMode.value      = ''
-  t2vDuration.value    = 5
-  t2vAspectRatio.value = '16:9'
+  videoStatus.value    = ''
+  videoError.value     = ''
+  resetAvatarImage()
+  stopVideoPolling()
   error.value          = ''
 }
 </script>
-
-<style>
-.mode-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin: 16px 0;
-}
-.mode-card {
-  border: 2px solid #e5e7eb;
-  border-radius: 12px;
-  padding: 24px 16px;
-  text-align: center;
-  cursor: pointer;
-  transition: border-color 0.2s, background 0.2s;
-}
-.mode-card:hover { border-color: #6366f1; }
-.mode-card.selected { border-color: #6366f1; background: #f0f0ff; }
-.mode-icon { font-size: 32px; margin-bottom: 8px; }
-.mode-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
-.mode-desc { font-size: 12px; color: #888; line-height: 1.5; }
-</style>

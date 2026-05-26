@@ -1,86 +1,129 @@
-网页 URL 或上传视频 → 提取文本 → Kimi 按风格改写 →用户确认/编辑 → Edge TTS 生成语音 → 火山引擎数字人视频工作流
-## 功能概览
+# 数字人内容工作流
 
-| 模块 | 说明 |
-|------|------|
-| **数字人内容工作流** | 网页 URL 或上传视频 → **提取文本** → **Kimi 按风格改写** → **用户确认/编辑** → **Edge TTS 生成语音** → **火山引擎数字人视频**（后两步需在 `.env` 配置对应项）。 |
-| **H5 页面** | 将上述工作流做成分步界面（提取 → 改写 → 确认 → 语音 → 视频），通过 Vite 开发服务器访问；接口经代理转发到本机 `8000` 端口后端。 |
+这份项目现在只保留一条流程：
+
+网页 URL / 上传视频 / 直接输入文本
+→ 提取或确认文本
+→ AI 改写
+→ 确认文本
+→ 上传人物图 + 生成语音
+→ 异步生成可灵数字人口播视频
+
+## 主要模块
+
+- `server.py`
+  工作流后端接口，提供 `/workflow/*`
+- `frontend/`
+  分步式 H5 界面
+- `content_extraction.py`
+  网页内容提取、视频转写、抖音分享解析
+- `text_rewrite.py`
+  调用 Moonshot/Kimi 做文本改写
+- `tts_service.py`
+  使用 Edge TTS 生成中文音频
+- `kling_service.py`
+  调用可灵的 Avatar 接口
+- `workflow_state.py`
+  内存态工作流状态
+- `moonshot_service.py`
+  `.env` 加载与 Kimi 客户端初始化
 
 ## 环境要求
 
-- Python **3.10+**
-- **[uv](https://docs.astral.sh/uv/)**（依赖管理工具，安装见下方）
-- **Node.js 18+**（仅在使用 `frontend/` H5 时需要，用于 `npm`）
-- 网络（首次运行会下载嵌入模型；国内可在 `.env` 中配置 Hugging Face 镜像，见 `.env.example`）
+- Python 3.10+
+- `uv`
+- Node.js 18+（仅前端开发需要）
+- `ffmpeg`（视频转写需要）
 
-## 安装与配置
+## 安装
 
-1. **安装 uv**（如未安装）：
+```bash
+uv sync
+cp .env.example .env
+```
 
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+至少配置：
 
-2. **克隆或进入项目根目录**，同步依赖（uv 会自动创建 `.venv` 并安装所有依赖）：
+```env
+MOONSHOT_API_KEY=...
+KLING_ACCESS_KEY_ID=...
+KLING_ACCESS_KEY_SECRET=...
+```
 
-   ```bash
-   uv sync
-   ```
+可选：
 
-3. **配置 API Key**：复制环境变量模板并填写 **Moonshot API Key**：
+```env
+TTS_VOICE=zh-CN-XiaoxiaoNeural
+KLING_API_BASE_URL=https://api.klingai.com
+KLING_PRINT_JWT=0
+KLING_DEBUG_HTTP=0
+WORKFLOW_STORE_BACKEND=mysql
+WORKFLOW_DATABASE_URL=mysql+pymysql://root:password@127.0.0.1:3306/digital_human_workflow
+WORKFLOW_MYSQL_TABLE=workflow_sessions
+```
 
-   ```bash
-   cp .env.example .env
-   ```
+说明：
 
-   编辑 `.env`，至少设置 `MOONSHOT_API_KEY`。可选项（模型名、CORS、TTS、火山引擎数字人等）说明见 `.env.example` 内注释。
+- 默认网关已改为 `https://api.klingai.com`
+- 如果你的可灵账号明确要求新加坡网关，再手动覆盖 `KLING_API_BASE_URL=https://api-singapore.klingai.com`
+- 排查鉴权时可临时设置 `KLING_PRINT_JWT=1`，后端控制台会打印完整 JWT，排查后建议改回 `0`
+- 排查请求头时可临时设置 `KLING_DEBUG_HTTP=1`，后端控制台会打印 Authorization 是否实际带出
+- `WORKFLOW_STORE_BACKEND=mysql` 会把工作流会话写入 MySQL，后端重启后仍可查询旧 session
 
-4. **（可选）安装 H5 前端依赖**：
+MySQL 首次使用前先建库：
 
-   ```bash
-   cd frontend && npm install && cd ..
-   ```
+```sql
+CREATE DATABASE IF NOT EXISTS digital_human_workflow
+  DEFAULT CHARACTER SET utf8mb4
+  DEFAULT COLLATE utf8mb4_unicode_ci;
+```
 
-## 启动方式
+应用启动时会自动创建 `workflow_sessions` 表。
 
-### 1. 后端：FastAPI（必须先启动，H5 与接口共用）
+前端依赖：
+
+```bash
+cd frontend
+npm install
+```
+
+## 启动
+
+后端：
 
 ```bash
 uv run uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
-- 接口文档：<http://127.0.0.1:8000/docs>
-- 健康检查：<http://127.0.0.1:8000/health>
-- 局域网调试（手机连同一 Wi‑Fi 等）可将 `--host` 改为 `0.0.0.0`
+接口文档：
 
-公网部署时请自行增加鉴权、HTTPS 与限流等安全措施。
+- [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
-### 2. H5 页面：Vite 开发服务器（数字人工作流界面）
-
-**须与上一步后端同时运行**：`frontend/vite.config.js` 已将 `/workflow`、`/rewrite-styles`、`/generated` 代理到 `http://127.0.0.1:8000`。
-
-在项目根目录新开一个终端：
+前端：
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-默认在浏览器打开：<http://127.0.0.1:5173/>
+默认地址：
 
-- **局域网用手机访问**：可先让后端 `uvicorn` 使用 `--host 0.0.0.0`；前端使用 `npm run dev -- --host`，并把 `vite.config.js` 里 `proxy` 的 `target` 从 `127.0.0.1` 改为你电脑的局域网 IP（与手机在同一网段）。
-- 构建静态资源：`cd frontend && npm run build`，产物在 `frontend/dist/`。当前仓库未把 `dist` 挂到 FastAPI，生产环境可交给 Nginx 托管，或自行在 `server.py` 挂载静态目录并处理 API 跨域。
+- [http://127.0.0.1:5173](http://127.0.0.1:5173)
 
-### 3. 终端对话（CLI，可选）
+## 保留的工作流接口
 
-```bash
-uv run python main.py
-```
+- `POST /workflow/start`
+- `POST /workflow/upload`
+- `GET /rewrite-styles`
+- `POST /workflow/{session_id}/rewrite`
+- `POST /workflow/{session_id}/confirm`
+- `POST /workflow/{session_id}/audio`
+- `POST /workflow/{session_id}/avatar-image`
+- `POST /workflow/{session_id}/video`
+- `GET /workflow/{session_id}/status`
+- `GET /workflow/sessions`
 
-首次启动会构建向量索引并可能下载嵌入模型。命令：`/agent` 切换角色、`quit` 退出。
+## 说明
 
----
-
-更多实现细节见源码：`rag_chat.py`、`multi_agent.py`、`content_extraction.py`、`text_rewrite.py`、`tts_service.py`、`digital_human_service.py`；Web 入口为 `server.py`，H5 为 `frontend/src/App.vue`。
-
-
+- 项目已经移除聊天/RAG/多角色/联网检索相关代码
+- 启动工作流后端时，不会再初始化 Hugging Face 向量模型

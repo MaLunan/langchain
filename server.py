@@ -1,18 +1,13 @@
 """
-本地 HTTP 接口：把 RAG + 多轮对话暴露成 REST，方便前端、其它服务或 curl 调用。
+数字人内容工作流的本地 HTTP 接口。
 
-为什么用 FastAPI？
-  自动生成 OpenAPI 文档、类型校验清晰，和 Pydantic 生态一致，适合快速搭本地/内网 API。
-
-启动（项目根目录、已激活虚拟环境）：
-  uvicorn server:app --host 127.0.0.1 --port 8000
-
-局域网可访问（手机连同一 WiFi 调试时）：
-  uvicorn server:app --host 0.0.0.0 --port 8000
-
-浏览器打开接口说明：http://127.0.0.1:8000/docs
-
-生产环境注意：公网务必加鉴权（API Key）、HTTPS（Nginx/Caddy）、限流与日志。
+职责：
+- 内容提取
+- AI 改写
+- 用户确认文本
+- TTS 生成语音
+- 上传数字人参考图
+- 调用可灵生成数字人口播视频
 """
 
 from __future__ import annotations
@@ -21,13 +16,19 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from multi_agent import create_agent_hub, suggest_agent_for_message
-from workflow_state import WorkflowStep, create_workflow, make_workflow_store
+from moonshot_service import build_moonshot_llm, load_env
+from workflow_state import (
+    WorkflowStep,
+    create_workflow,
+    list_workflows,
+    make_workflow_store,
+    save_workflow,
+)
 
 # 本地文件存储目录
 _BASE_DIR = Path(__file__).resolve().parent
@@ -37,49 +38,16 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 GENERATED_DIR.mkdir(exist_ok=True)
 
 
-class AgentInfo(BaseModel):
-    agent_id: str
-    display_name: str
-    description: str
-
-
-class ChatRequest(BaseModel):
-    """单次对话：同一 session_id 在同一角色下保留多轮记忆。"""
-
-    message: str = Field(..., min_length=1, description="用户当前输入")
-    session_id: str = Field(
-        default="default",
-        min_length=1,
-        max_length=256,
-        description="会话标识，例如用户 ID 或浏览器生成的 UUID",
-    )
-    agent_id: str = Field(
-        default="assistant",
-        description="角色 ID，见 GET /agents；与 auto_route 同时为真时先自动再回退",
-    )
-    auto_route: bool = Field(
-        default=False,
-        description="为 true 时先多调一次 Kimi 选角，再让该角色回答（多一次费用）",
-    )
-
-
-class ChatResponse(BaseModel):
-    reply: str
-    agent_id: str = Field(description="本轮实际使用的角色 ID")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时构建向量库与各角色链；向量与嵌入模型只加载一次。
-    hub, llm = create_agent_hub()
-    app.state.agent_hub = hub
-    app.state.router_llm = llm
-    # 工作流状态存储
+    # 启动时只初始化工作流所需的环境与共享 LLM。
+    load_env()
+    app.state.router_llm = build_moonshot_llm()
     app.state.workflow_store = make_workflow_store()
     yield
 
 
-app = FastAPI(title="Kimi RAG Chat & 数字人工作流", lifespan=lifespan)
+app = FastAPI(title="数字人内容工作流", lifespan=lifespan)
 
 _origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
@@ -95,51 +63,9 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
-
-@app.get("/agents", response_model=list[AgentInfo])
-def list_agents(request: Request):
-    """列出可用角色，供前端下拉框或调试。"""
-    from multi_agent import BUILTIN_AGENT_PROFILES
-
-    return [
-        AgentInfo(agent_id=p.agent_id, display_name=p.display_name, description=p.description)
-        for p in BUILTIN_AGENT_PROFILES
-    ]
-
-
-@app.post("/chat", response_model=ChatResponse)
-def chat(body: ChatRequest, request: Request):
-    hub = request.app.state.agent_hub
-    llm = request.app.state.router_llm
-
-    if body.auto_route:
-        used_id = suggest_agent_for_message(body.message, llm)
-    else:
-        used_id = body.agent_id.strip() or "assistant"
-
-    if used_id not in hub:
-        raise HTTPException(
-            status_code=400,
-            detail=f"未知 agent_id：{used_id}，请先 GET /agents 查看列表。",
-        )
-
-    chain = hub[used_id]
-    try:
-        out = chain.invoke(
-            {"input": body.message.strip()},
-            config={"configurable": {"session_id": body.session_id}},
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    return ChatResponse(reply=out.content or "", agent_id=used_id)
-
-
-# ---------------------------------------------------------------------------
-# 工作流：内容提取 → 文本改写 → 用户确认 → 音频 → 数字人视频
-# ---------------------------------------------------------------------------
-
 class WorkflowStartRequest(BaseModel):
-    source: str = Field(..., description="网页 URL 或已上传视频文件的服务器路径")
+    source: str = Field(default="", description="网页 URL 或已上传视频文件的服务器路径")
+    raw_text: str = Field(default="", description="手动输入的原始文本，可直接进入确认流程")
 
 
 class WorkflowStartResponse(BaseModel):
@@ -176,16 +102,24 @@ class AudioResponse(BaseModel):
     audio_url: str
 
 
+class AvatarImageResponse(BaseModel):
+    session_id: str
+    file_path: str
+    image_url: str
+
+
 class VideoResponse(BaseModel):
     session_id: str
-    video_url: str
+    video_status: str
+    video_url: str | None = None
+    video_error: str | None = None
 
 
 class VideoRequest(BaseModel):
     mode: str = Field(
-        ...,
-        description="生成模式：avatar（数字人口播）或 text2video（文生视频）",
-        pattern="^(avatar|text2video)$",
+        default="avatar",
+        description="生成模式：仅支持 avatar（数字人口播）",
+        pattern="^avatar$",
     )
 
 
@@ -197,7 +131,22 @@ class WorkflowStatusResponse(BaseModel):
     rewritten_text: str
     final_text: str
     audio_url: str | None
+    avatar_image_ready: bool
+    avatar_image_url: str | None
     video_url: str | None
+    video_mode: str
+    video_status: str
+    video_error: str | None = None
+
+
+class WorkflowSessionInfo(BaseModel):
+    session_id: str
+    current_step: str
+    source_type: str
+    text_preview: str
+    video_mode: str
+    video_url: str | None = None
+    updated_at: str | None = None
 
 
 def _get_state(request: Request, session_id: str):
@@ -208,19 +157,84 @@ def _get_state(request: Request, session_id: str):
         raise HTTPException(status_code=404, detail=f"工作流会话不存在：{session_id}")
 
 
-@app.post("/workflow/start", response_model=WorkflowStartResponse, tags=["workflow"])
-def workflow_start(body: WorkflowStartRequest, request: Request):
-    """步骤 1：提交 URL 或本地视频路径，提取文本，返回 session_id。"""
-    from content_extraction import extract_content
+def _avatar_image_url(state) -> str | None:
+    if not state.avatar_image_path:
+        return None
+    return f"/uploads/{Path(state.avatar_image_path).name}"
+
+
+def _video_status(state) -> str:
+    if state.video_status:
+        return state.video_status
+    return "succeed" if state.video_url else ""
+
+
+def _run_avatar_video_job(store_fn, session_id: str) -> None:
+    """后台生成数字人口播视频，并把结果写回工作流存储。"""
+    from kling_service import generate_avatar_video
 
     try:
-        text, source_type = extract_content(body.source)
+        state = store_fn(session_id)
+        state.video_status = "processing"
+        state.video_error = None
+        state.video_mode = "avatar"
+        state.current_step = WorkflowStep.VIDEO_PENDING
+        save_workflow(store_fn, state)
+
+        image_path = Path(state.avatar_image_path or "")
+        audio_path = Path(state.audio_path or "")
+        video_url = generate_avatar_video(image_path, audio_path)
+
+        state = store_fn(session_id)
+        state.video_url = video_url
+        state.video_status = "succeed"
+        state.video_error = None
+        state.video_mode = "avatar"
+        state.current_step = WorkflowStep.VIDEO_DONE
+        save_workflow(store_fn, state)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"内容提取失败：{e}") from e
+        try:
+            state = store_fn(session_id)
+            state.video_status = "failed"
+            state.video_error = str(e)
+            state.video_mode = "avatar"
+            state.current_step = WorkflowStep.VIDEO_FAILED
+            save_workflow(store_fn, state)
+        except Exception:
+            pass
+
+
+@app.get("/workflow/sessions", response_model=list[WorkflowSessionInfo], tags=["workflow"])
+def workflow_sessions(request: Request, limit: int = 50):
+    """列出最近的工作流会话，供前端选择并恢复。"""
+    safe_limit = min(max(limit, 1), 200)
+    return list_workflows(request.app.state.workflow_store, limit=safe_limit)
+
+
+@app.post("/workflow/start", response_model=WorkflowStartResponse, tags=["workflow"])
+def workflow_start(body: WorkflowStartRequest, request: Request):
+    """步骤 1：提交 URL / 视频路径 / 手动文本，初始化工作流并返回 session_id。"""
+    from content_extraction import extract_content
+
+    raw_text = body.raw_text.strip()
+    source = body.source.strip()
+
+    if raw_text:
+        text = raw_text
+        source_type = "text"
+        state_source = raw_text
+    else:
+        if not source:
+            raise HTTPException(status_code=422, detail="source 或 raw_text 至少提供一个。")
+        try:
+            text, source_type = extract_content(source)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"内容提取失败：{e}") from e
+        state_source = source
 
     state = create_workflow(
         request.app.state.workflow_store,
-        source=body.source,
+        source=state_source,
         source_type=source_type,
         extracted_text=text,
     )
@@ -269,7 +283,14 @@ def workflow_rewrite(session_id: str, body: RewriteRequest, request: Request):
         raise HTTPException(status_code=500, detail=f"改写失败：{e}") from e
 
     state.rewritten_text = rewritten
+    state.final_text = ""
+    state.audio_path = None
+    state.video_url = None
+    state.video_status = ""
+    state.video_error = None
+    state.video_mode = "avatar"
     state.current_step = WorkflowStep.REWRITTEN
+    save_workflow(request.app.state.workflow_store, state)
     return RewriteResponse(session_id=session_id, rewritten_text=rewritten)
 
 
@@ -278,7 +299,13 @@ def workflow_confirm(session_id: str, body: ConfirmRequest, request: Request):
     """步骤 3：用户确认或修改文本，存入 final_text。"""
     state = _get_state(request, session_id)
     state.final_text = body.final_text.strip()
+    state.audio_path = None
+    state.video_url = None
+    state.video_status = ""
+    state.video_error = None
+    state.video_mode = "avatar"
     state.current_step = WorkflowStep.CONFIRMED
+    save_workflow(request.app.state.workflow_store, state)
     return ConfirmResponse(session_id=session_id, final_text=state.final_text)
 
 
@@ -298,57 +325,94 @@ def workflow_audio(session_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"TTS 生成失败：{e}") from e
 
     state.audio_path = str(output_path)
+    state.video_url = None
+    state.video_status = ""
+    state.video_error = None
+    state.video_mode = "avatar"
     state.current_step = WorkflowStep.AUDIO_DONE
+    save_workflow(request.app.state.workflow_store, state)
 
     audio_url = f"/generated/{session_id}.mp3"
     return AudioResponse(session_id=session_id, audio_url=audio_url)
 
 
-@app.post("/workflow/{session_id}/video", response_model=VideoResponse, tags=["workflow"])
-def workflow_video(session_id: str, body: VideoRequest, request: Request):
-    """
-    步骤 5：生成视频。
-
-    mode=avatar     先必须调用 /audio，用音频驱动数字人口播（可灵 lip-sync）。
-    mode=text2video 直接用 final_text 调用可灵文生视频，无需先生成音频。
-    """
-    from kling_service import generate_avatar_video, generate_text_to_video
-
+@app.post("/workflow/{session_id}/avatar-image", response_model=AvatarImageResponse, tags=["workflow"])
+async def workflow_avatar_image(session_id: str, request: Request, file: UploadFile = File(...)):
+    """上传数字人参考图，供 Avatar image2video 接口使用。"""
     state = _get_state(request, session_id)
+    if not state.final_text:
+        raise HTTPException(status_code=409, detail="请先确认文本（POST /workflow/{id}/confirm）。")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=422, detail="请上传图片文件（PNG/JPG/JPEG/WebP）。")
 
-    if body.mode == "avatar":
-        if not state.audio_path:
-            raise HTTPException(
-                status_code=409,
-                detail="mode=avatar 需要先生成音频（POST /workflow/{id}/audio）。",
-            )
-        audio_path = Path(state.audio_path)
-        if not audio_path.exists():
-            raise HTTPException(status_code=500, detail=f"音频文件不存在：{audio_path}")
-        try:
-            video_url = generate_avatar_video(audio_path)
-        except EnvironmentError as e:
-            raise HTTPException(status_code=503, detail=str(e)) from e
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"数字人视频生成失败：{e}") from e
+    suffix = Path(file.filename or "").suffix.lower() or ".png"
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(status_code=422, detail="头像图片仅支持 PNG/JPG/JPEG/WebP。")
 
-    else:  # text2video
-        if not state.final_text:
-            raise HTTPException(
-                status_code=409,
-                detail="请先确认文本（POST /workflow/{id}/confirm）。",
-            )
-        try:
-            video_url = generate_text_to_video(state.final_text)
-        except EnvironmentError as e:
-            raise HTTPException(status_code=503, detail=str(e)) from e
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"文生视频生成失败：{e}") from e
+    dest = UPLOADS_DIR / f"{session_id}_avatar{suffix}"
+    content = await file.read()
+    dest.write_bytes(content)
 
-    state.video_mode = body.mode
-    state.video_url = video_url
-    state.current_step = WorkflowStep.VIDEO_DONE
-    return VideoResponse(session_id=session_id, video_url=video_url)
+    state.avatar_image_path = str(dest)
+    state.video_url = None
+    state.video_status = ""
+    state.video_error = None
+    state.video_mode = "avatar"
+    save_workflow(request.app.state.workflow_store, state)
+    return AvatarImageResponse(session_id=session_id, file_path=str(dest), image_url=_avatar_image_url(state) or "")
+
+
+@app.post("/workflow/{session_id}/video", response_model=VideoResponse, tags=["workflow"])
+def workflow_video(
+    session_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    body: VideoRequest | None = None,
+):
+    """
+    步骤 5：异步生成数字人口播视频。
+
+    必须先调用 /audio 和 /avatar-image，用人物图 + 音频驱动数字人口播。
+    接口会快速返回 queued/processing，前端通过 /status 轮询最终 video_url。
+    """
+    state = _get_state(request, session_id)
+    if body and body.mode != "avatar":
+        raise HTTPException(status_code=422, detail="当前只支持数字人口播。")
+    if state.video_url:
+        return VideoResponse(
+            session_id=session_id,
+            video_status="succeed",
+            video_url=state.video_url,
+        )
+    if _video_status(state) in {"queued", "processing"}:
+        return VideoResponse(
+            session_id=session_id,
+            video_status=_video_status(state),
+            video_url=state.video_url,
+            video_error=state.video_error,
+        )
+    if not state.final_text:
+        raise HTTPException(status_code=409, detail="请先确认文本（POST /workflow/{id}/confirm）。")
+    if not state.audio_path:
+        raise HTTPException(status_code=409, detail="请先生成音频（POST /workflow/{id}/audio）。")
+    if not state.avatar_image_path:
+        raise HTTPException(status_code=409, detail="请先上传数字人图片（POST /workflow/{id}/avatar-image）。")
+
+    audio_path = Path(state.audio_path)
+    if not audio_path.exists():
+        raise HTTPException(status_code=500, detail=f"音频文件不存在：{audio_path}")
+    image_path = Path(state.avatar_image_path)
+    if not image_path.exists():
+        raise HTTPException(status_code=500, detail=f"数字人图片不存在：{image_path}")
+
+    state.video_mode = "avatar"
+    state.video_status = "queued"
+    state.video_error = None
+    state.video_url = None
+    state.current_step = WorkflowStep.VIDEO_PENDING
+    save_workflow(request.app.state.workflow_store, state)
+    background_tasks.add_task(_run_avatar_video_job, request.app.state.workflow_store, session_id)
+    return VideoResponse(session_id=session_id, video_status="queued")
 
 
 @app.get("/workflow/{session_id}/status", response_model=WorkflowStatusResponse, tags=["workflow"])
@@ -363,9 +427,15 @@ def workflow_status(session_id: str, request: Request):
         rewritten_text=state.rewritten_text,
         final_text=state.final_text,
         audio_url=f"/generated/{session_id}.mp3" if state.audio_path else None,
+        avatar_image_ready=bool(state.avatar_image_path),
+        avatar_image_url=_avatar_image_url(state),
         video_url=state.video_url,
+        video_mode=state.video_mode or "avatar",
+        video_status=_video_status(state),
+        video_error=state.video_error,
     )
 
 
 # 挂载静态文件目录，让前端可以直接访问生成的音视频
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 app.mount("/generated", StaticFiles(directory=str(GENERATED_DIR)), name="generated")

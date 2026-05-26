@@ -1,7 +1,5 @@
 """
 文本改写：调用 Kimi 将原始文本改写成不同风格，语义保持一致。
-
-复用 rag_chat.build_moonshot_llm()，遵循 multi_agent.py 的 chain 构建模式。
 """
 
 from __future__ import annotations
