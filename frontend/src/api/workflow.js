@@ -51,9 +51,13 @@ export async function generateAudio(sessionId) {
   return request('POST', `/workflow/${sessionId}/audio`)
 }
 
-/** 步骤 4b：生成数字人视频 */
-export async function generateVideo(sessionId) {
-  return request('POST', `/workflow/${sessionId}/video`)
+/** 步骤 5：生成视频
+ * @param {string} sessionId
+ * @param {'avatar'|'text2video'} mode
+ * @param {object} params  文生视频额外参数（duration、aspect_ratio）
+ */
+export async function generateVideo(sessionId, mode, params = {}) {
+  return request('POST', `/workflow/${sessionId}/video`, { mode, ...params })
 }
 
 /** 查询工作流状态 */
