@@ -14,7 +14,7 @@
         v-for="(s, i) in STEPS"
         :key="s.key"
         class="step-item"
-        :class="{ active: currentStep === i, done: currentStep > i }"
+        :class="{ active: currentStep === i, done: isStepDone(i) }"
       >
         <div class="step-dot">
           <span v-if="currentStep > i">✓</span>
@@ -165,11 +165,69 @@
       </div>
     </div>
 
-    <!-- ── 步骤 3：生成音频 ──────────────────────────── -->
+    <!-- ── 步骤 3：选择模式 ──────────────────────────── -->
     <div v-if="currentStep === 3" class="card">
       <div class="card-title">
-        <span>🔊 生成语音</span>
+        <span>🎯 选择生成方式</span>
         <span class="badge">步骤 4</span>
+      </div>
+
+      <div class="mode-grid">
+        <div
+          class="mode-card"
+          :class="{ selected: videoMode === 'avatar' }"
+          @click="videoMode = 'avatar'"
+        >
+          <div class="mode-icon">🎙️</div>
+          <div class="mode-title">数字人口播</div>
+          <div class="mode-desc">生成 TTS 音频，再驱动数字人对嘴播报</div>
+        </div>
+        <div
+          class="mode-card"
+          :class="{ selected: videoMode === 'text2video' }"
+          @click="videoMode = 'text2video'"
+        >
+          <div class="mode-icon">🎬</div>
+          <div class="mode-title">文生视频</div>
+          <div class="mode-desc">直接将文字交给可灵 AI 生成视频，无需音频</div>
+        </div>
+      </div>
+
+      <template v-if="videoMode === 'text2video'">
+        <div class="input-group" style="margin-top:16px">
+          <label>视频时长</label>
+          <div class="tabs" style="width:fit-content">
+            <button class="tab-btn" :class="{ active: t2vDuration === 5 }" @click="t2vDuration = 5">5 秒</button>
+            <button class="tab-btn" :class="{ active: t2vDuration === 10 }" @click="t2vDuration = 10">10 秒</button>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>画面比例</label>
+          <div class="tabs" style="width:fit-content">
+            <button class="tab-btn" :class="{ active: t2vAspectRatio === '16:9' }" @click="t2vAspectRatio = '16:9'">16:9</button>
+            <button class="tab-btn" :class="{ active: t2vAspectRatio === '9:16' }" @click="t2vAspectRatio = '9:16'">9:16</button>
+            <button class="tab-btn" :class="{ active: t2vAspectRatio === '1:1' }" @click="t2vAspectRatio = '1:1'">1:1</button>
+          </div>
+        </div>
+      </template>
+
+      <div class="btn-row">
+        <button class="btn btn-outline" @click="currentStep = 2">← 修改文本</button>
+        <button
+          class="btn btn-primary"
+          :disabled="!videoMode"
+          @click="handleModeSelect"
+        >
+          下一步 →
+        </button>
+      </div>
+    </div>
+
+    <!-- ── 步骤 4：生成音频（仅 Mode A）───────────────── -->
+    <div v-if="currentStep === 4" class="card">
+      <div class="card-title">
+        <span>🔊 生成语音</span>
+        <span class="badge">步骤 5</span>
       </div>
 
       <div class="input-group">
@@ -177,65 +235,53 @@
         <div class="result-box">{{ finalText }}</div>
       </div>
 
-      <!-- 音频播放器 -->
       <template v-if="audioUrl">
         <div class="alert alert-success">✅ 音频生成成功</div>
         <audio :src="audioUrl" controls></audio>
       </template>
 
       <div class="btn-row">
-        <button class="btn btn-outline" @click="currentStep = 2">← 修改文本</button>
-        <button
-          v-if="!audioUrl"
-          class="btn btn-primary"
-          :disabled="loading"
-          @click="handleAudio"
-        >
+        <button class="btn btn-outline" @click="currentStep = 3">← 重新选择</button>
+        <button v-if="!audioUrl" class="btn btn-primary" :disabled="loading" @click="handleAudio">
           <span v-if="loading" class="spinner"></span>
           <span>{{ loading ? '生成中…' : '生成语音' }}</span>
         </button>
-        <button v-if="audioUrl" class="btn btn-primary" @click="currentStep = 4">
+        <button v-if="audioUrl" class="btn btn-primary" @click="currentStep = 5">
           下一步：生成视频 →
         </button>
       </div>
     </div>
 
-    <!-- ── 步骤 4：生成数字人视频 ───────────────────── -->
-    <div v-if="currentStep === 4" class="card">
+    <!-- ── 步骤 5：生成视频 ───────────────────────────── -->
+    <div v-if="currentStep === 5" class="card">
       <div class="card-title">
-        <span>🤖 数字人视频</span>
-        <span class="badge">步骤 5</span>
+        <span>{{ videoMode === 'avatar' ? '🤖 数字人视频' : '🎬 文生视频' }}</span>
+        <span class="badge">步骤 6</span>
       </div>
 
       <template v-if="videoUrl">
         <div class="alert alert-success">🎉 视频生成成功！</div>
-        <a :href="videoUrl" target="_blank" class="video-link">
-          🎬 点击查看 / 下载视频
-        </a>
+        <a :href="videoUrl" target="_blank" class="video-link">🎬 点击查看 / 下载视频</a>
       </template>
       <template v-else>
         <div class="alert alert-info">
-          ⚡ 数字人视频生成通常需要 1-3 分钟，请耐心等待。
+          ⚡ {{ videoMode === 'avatar' ? '数字人口播' : '文生视频' }}生成通常需要 1-3 分钟，请耐心等待。
+        </div>
+        <div v-if="videoMode === 'text2video'" class="alert alert-info" style="margin-top:0">
+          📝 时长：{{ t2vDuration }}s　比例：{{ t2vAspectRatio }}
         </div>
         <div class="alert alert-info" style="margin-top:0">
-          ⚙️ 需要在 .env 中配置 VOLCENGINE_ACCESS_KEY / SECRET_KEY / AVATAR_ID。
+          ⚙️ 需要在 .env 中配置 KLING_ACCESS_KEY_ID / KLING_ACCESS_KEY_SECRET{{ videoMode === 'avatar' ? ' / KLING_AVATAR_ID' : '' }}
         </div>
       </template>
 
       <div class="btn-row">
-        <button class="btn btn-outline" @click="currentStep = 3">← 返回音频</button>
-        <button
-          v-if="!videoUrl"
-          class="btn btn-primary"
-          :disabled="loading"
-          @click="handleVideo"
-        >
+        <button class="btn btn-outline" @click="currentStep = videoMode === 'avatar' ? 4 : 3">← 返回</button>
+        <button v-if="!videoUrl" class="btn btn-primary" :disabled="loading" @click="handleVideo">
           <span v-if="loading" class="spinner"></span>
-          <span>{{ loading ? '生成中（请等待）…' : '生成数字人视频' }}</span>
+          <span>{{ loading ? '生成中（请等待）…' : (videoMode === 'avatar' ? '生成数字人视频' : '文生视频') }}</span>
         </button>
-        <button v-if="videoUrl" class="btn btn-success" @click="reset">
-          🔄 重新开始
-        </button>
+        <button v-if="videoUrl" class="btn btn-success" @click="reset">🔄 重新开始</button>
       </div>
     </div>
 
@@ -262,11 +308,18 @@ const STEPS = [
   { key: 'extract', label: '提取内容' },
   { key: 'rewrite', label: 'AI 改写' },
   { key: 'confirm', label: '确认文本' },
+  { key: 'mode',    label: '选择模式' },
   { key: 'audio',   label: '生成语音' },
-  { key: 'video',   label: '数字人视频' },
+  { key: 'video',   label: '生成视频' },
 ]
 
 const STYLE_ICONS = { professional: '📋', casual: '💬', news: '📰' }
+
+function isStepDone(i) {
+  if (currentStep.value > i) return true
+  if (i === 4 && videoMode.value === 'text2video' && currentStep.value >= 5) return true
+  return false
+}
 
 // ── 状态 ────────────────────────────────────────────────
 const currentStep  = ref(0)
@@ -286,6 +339,9 @@ const editableText  = ref('')
 const finalText     = ref('')
 const audioUrl      = ref('')
 const videoUrl      = ref('')
+const videoMode      = ref('')
+const t2vDuration    = ref(5)
+const t2vAspectRatio = ref('16:9')
 
 onMounted(async () => {
   try {
@@ -355,6 +411,14 @@ async function handleConfirm() {
   }
 }
 
+function handleModeSelect() {
+  if (videoMode.value === 'avatar') {
+    currentStep.value = 4
+  } else {
+    currentStep.value = 5
+  }
+}
+
 async function handleAudio() {
   error.value = ''
   loading.value = true
@@ -372,9 +436,11 @@ async function handleVideo() {
   error.value = ''
   loading.value = true
   try {
-    const res = await generateVideo(sessionId.value)
-    videoUrl.value    = res.video_url
-    currentStep.value = 4
+    const params = videoMode.value === 'text2video'
+      ? { duration: t2vDuration.value, aspect_ratio: t2vAspectRatio.value }
+      : {}
+    const res = await generateVideo(sessionId.value, videoMode.value, params)
+    videoUrl.value = res.video_url
   } catch (e) {
     error.value = e.message
   } finally {
@@ -383,15 +449,40 @@ async function handleVideo() {
 }
 
 function reset() {
-  currentStep.value   = 0
-  sessionId.value     = ''
-  urlInput.value      = ''
-  selectedFile.value  = null
-  extractedText.value = ''
-  editableText.value  = ''
-  finalText.value     = ''
-  audioUrl.value      = ''
-  videoUrl.value      = ''
-  error.value         = ''
+  currentStep.value    = 0
+  sessionId.value      = ''
+  urlInput.value       = ''
+  selectedFile.value   = null
+  extractedText.value  = ''
+  editableText.value   = ''
+  finalText.value      = ''
+  audioUrl.value       = ''
+  videoUrl.value       = ''
+  videoMode.value      = ''
+  t2vDuration.value    = 5
+  t2vAspectRatio.value = '16:9'
+  error.value          = ''
 }
 </script>
+
+<style>
+.mode-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 16px 0;
+}
+.mode-card {
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 24px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.mode-card:hover { border-color: #6366f1; }
+.mode-card.selected { border-color: #6366f1; background: #f0f0ff; }
+.mode-icon { font-size: 32px; margin-bottom: 8px; }
+.mode-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.mode-desc { font-size: 12px; color: #888; line-height: 1.5; }
+</style>
