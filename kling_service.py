@@ -132,3 +132,44 @@ def generate_avatar_video(
         raise RuntimeError(f"任务提交失败：{task_resp.text}")
 
     return _poll_task(task_id, timeout=timeout)
+
+
+# ── 模式 B：文生视频 ───────────────────────────────────────────────────────
+
+def generate_text_to_video(
+    text: str,
+    model: str = "kling-v1",
+    duration: int = 5,
+    aspect_ratio: str = "16:9",
+    mode: str = "std",
+    timeout: int = 300,
+) -> str:
+    """
+    将文字描述提交给可灵文生视频接口，轮询等待，返回视频 URL。
+
+    model:        "kling-v1" 或 "kling-v1-5"
+    duration:     5 或 10（秒）
+    aspect_ratio: "16:9" / "9:16" / "1:1"
+    mode:         "std"（标准）或 "pro"（高质量，消耗更多配额）
+    """
+    ak, sk = _get_credentials()
+
+    payload = {
+        "model": model,
+        "prompt": text,
+        "duration": duration,
+        "aspect_ratio": aspect_ratio,
+        "mode": mode,
+    }
+    resp = requests.post(
+        f"{_BASE_URL}/v1/videos/text2video",
+        headers=_auth_headers(ak, sk),
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    task_id = resp.json().get("data", {}).get("task_id", "")
+    if not task_id:
+        raise RuntimeError(f"文生视频任务提交失败：{resp.text}")
+
+    return _poll_task(task_id, timeout=timeout)

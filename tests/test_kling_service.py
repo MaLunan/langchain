@@ -90,3 +90,31 @@ def test_generate_avatar_video_calls_lip_sync(tmp_path):
     assert url == "https://cdn.kling.ai/avatar.mp4"
     # Verify the second POST called lip-sync
     assert "lip-sync" in mock_post.call_args_list[1][0][0]
+
+
+# ── 文生视频 ─────────────────────────────────────────────────────────────────
+
+def test_generate_text_to_video_submits_prompt():
+    from kling_service import generate_text_to_video
+
+    post_resp = MagicMock()
+    post_resp.raise_for_status = MagicMock()
+    post_resp.json.return_value = {"data": {"task_id": "t2v_task_1"}}
+
+    poll_resp = MagicMock()
+    poll_resp.raise_for_status = MagicMock()
+    poll_resp.json.return_value = {
+        "data": {"status": "succeed", "video_url": "https://cdn.kling.ai/t2v.mp4"}
+    }
+
+    with patch("kling_service.requests.post", return_value=post_resp) as mock_post, \
+         patch("kling_service.requests.get", return_value=poll_resp), \
+         patch("kling_service._make_jwt", return_value="tok"), \
+         patch.dict(os.environ, {"KLING_ACCESS_KEY_ID": "ak", "KLING_ACCESS_KEY_SECRET": "sk"}):
+        url = generate_text_to_video("一段科技感十足的介绍视频")
+
+    assert url == "https://cdn.kling.ai/t2v.mp4"
+    body = mock_post.call_args[1]["json"]
+    assert body["prompt"] == "一段科技感十足的介绍视频"
+    assert body["duration"] == 5
+    assert body["aspect_ratio"] == "16:9"
