@@ -9,22 +9,22 @@
 ## 环境要求
 
 - Python **3.10+**
+- **[uv](https://docs.astral.sh/uv/)**（依赖管理工具，安装见下方）
 - **Node.js 18+**（仅在使用 `frontend/` H5 时需要，用于 `npm`）
 - 网络（首次运行会下载嵌入模型；国内可在 `.env` 中配置 Hugging Face 镜像，见 `.env.example`）
 
 ## 安装与配置
 
-1. **克隆或进入项目根目录**，创建并激活虚拟环境（示例）：
+1. **安装 uv**（如未安装）：
 
    ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate   # Windows: .venv\Scripts\activate
+   curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-2. **安装依赖**（依赖列表见 `pyproject.toml`）：
+2. **克隆或进入项目根目录**，同步依赖（uv 会自动创建 `.venv` 并安装所有依赖）：
 
    ```bash
-   pip install -e .
+   uv sync
    ```
 
 3. **配置 API Key**：复制环境变量模板并填写 **Moonshot API Key**：
@@ -46,7 +46,7 @@
 ### 1. 后端：FastAPI（必须先启动，H5 与接口共用）
 
 ```bash
-uvicorn server:app --host 127.0.0.1 --port 8000
+uv run uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
 - 接口文档：<http://127.0.0.1:8000/docs>
@@ -74,7 +74,7 @@ npm run dev
 ### 3. 终端对话（CLI，可选）
 
 ```bash
-python main.py
+uv run python main.py
 ```
 
 首次启动会构建向量索引并可能下载嵌入模型。命令：`/agent` 切换角色、`quit` 退出。
