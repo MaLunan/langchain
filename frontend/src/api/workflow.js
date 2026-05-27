@@ -63,12 +63,21 @@ export async function uploadAvatarImage(sessionId, file) {
   return request('POST', `/workflow/${sessionId}/avatar-image`, form)
 }
 
-/** 步骤 5：异步提交数字人口播视频任务 */
-export async function generateVideo(sessionId) {
-  return request('POST', `/workflow/${sessionId}/video`, { mode: 'avatar' })
+/** 步骤 5：异步提交数字人口播视频任务，provider: 'kling' | 'baidu' */
+export async function generateVideo(sessionId, provider = 'kling') {
+  return request('POST', `/workflow/${sessionId}/video`, { mode: 'avatar', provider })
 }
 
 /** 查询工作流状态 */
 export async function getStatus(sessionId) {
   return request('GET', `/workflow/${sessionId}/status`)
+}
+
+/** 手动补录视频结果：传 task_id 让后端查询，或直接传 video_url */
+export async function patchVideoResult(sessionId, { taskId = '', videoUrl = '', provider = '' } = {}) {
+  return request('POST', `/workflow/${sessionId}/video-patch`, {
+    task_id: taskId,
+    video_url: videoUrl,
+    provider,
+  })
 }

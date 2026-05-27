@@ -35,6 +35,8 @@ class WorkflowState:
     video_mode:     str = "avatar"
     video_status:   str = ""          # "", "queued", "processing", "succeed", "failed"
     video_error:    Optional[str] = None
+    video_provider: str = "kling"     # "kling" | "baidu"
+    baidu_task_id:  Optional[str] = None  # 百度云任务 ID，超时重试时直接接着轮询
 
 
 @dataclass
@@ -46,6 +48,7 @@ class WorkflowSessionSummary:
     video_mode: str
     video_url: Optional[str] = None
     updated_at: Optional[str] = None
+    video_provider: str = "kling"
 
 
 class InMemoryWorkflowStore:
@@ -114,6 +117,8 @@ class MySQLWorkflowStore:
             "video_mode",
             "video_status",
             "video_error",
+            "video_provider",
+            "baidu_task_id",
         ]
         placeholders = ", ".join(["%s"] * len(columns))
         column_sql = ", ".join(f"`{c}`" for c in columns)
@@ -145,6 +150,7 @@ class MySQLWorkflowStore:
                       final_text,
                       video_mode,
                       video_url,
+                      video_provider,
                       updated_at
                     FROM `{self.table_name}`
                     ORDER BY updated_at DESC
@@ -182,6 +188,8 @@ class MySQLWorkflowStore:
                       video_mode VARCHAR(32) NOT NULL,
                       video_status VARCHAR(32) NOT NULL DEFAULT '',
                       video_error TEXT NULL,
+                      video_provider VARCHAR(32) NOT NULL DEFAULT 'kling',
+                      baidu_task_id VARCHAR(128) NULL,
                       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                         ON UPDATE CURRENT_TIMESTAMP
@@ -205,6 +213,16 @@ class MySQLWorkflowStore:
                     cur.execute(
                         f"ALTER TABLE `{self.table_name}` "
                         "ADD COLUMN `video_error` TEXT NULL"
+                    )
+                if "video_provider" not in existing:
+                    cur.execute(
+                        f"ALTER TABLE `{self.table_name}` "
+                        "ADD COLUMN `video_provider` VARCHAR(32) NOT NULL DEFAULT 'kling'"
+                    )
+                if "baidu_task_id" not in existing:
+                    cur.execute(
+                        f"ALTER TABLE `{self.table_name}` "
+                        "ADD COLUMN `baidu_task_id` VARCHAR(128) NULL"
                     )
 
 
@@ -264,6 +282,8 @@ def _state_to_row(state: WorkflowState) -> dict[str, str | None]:
         "video_mode": state.video_mode,
         "video_status": state.video_status,
         "video_error": state.video_error,
+        "video_provider": state.video_provider,
+        "baidu_task_id": state.baidu_task_id,
     }
 
 
@@ -282,6 +302,8 @@ def _state_from_row(row: dict) -> WorkflowState:
         video_mode=row.get("video_mode") or "avatar",
         video_status=row.get("video_status") or ("succeed" if row.get("video_url") else ""),
         video_error=row.get("video_error"),
+        video_provider=row.get("video_provider") or "kling",
+        baidu_task_id=row.get("baidu_task_id") or None,
     )
 
 
@@ -293,6 +315,7 @@ def _summary_from_state(state: WorkflowState) -> WorkflowSessionSummary:
         text_preview=_text_preview(state.final_text or state.rewritten_text or state.extracted_text),
         video_mode=state.video_mode,
         video_url=state.video_url,
+        video_provider=state.video_provider,
     )
 
 
@@ -308,6 +331,7 @@ def _summary_from_row(row: dict) -> WorkflowSessionSummary:
         video_mode=row.get("video_mode") or "",
         video_url=row.get("video_url"),
         updated_at=updated_at.isoformat(sep=" ") if hasattr(updated_at, "isoformat") else updated_at,
+        video_provider=row.get("video_provider") or "kling",
     )
 
 

@@ -268,3 +268,25 @@ def generate_avatar_video(
         raise RuntimeError(f"Avatar 任务提交失败：{task_resp.text}")
 
     return _poll_avatar_task(task_id, timeout=timeout)
+
+
+def query_avatar_task(task_id: str) -> dict:
+    """
+    单次查询 Avatar 任务状态，不轮询。
+
+    返回字典：
+      status: "succeed" | "failed" | "cancelled" | "processing" | "queued"
+      video_url: str（仅 succeed 时有值）
+    """
+    resp = _request_json("GET", f"/v1/videos/avatar/image2video/{task_id}", timeout=30)
+    data = resp.json().get("data", {})
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Avatar API 响应格式异常：{resp.text}")
+
+    status = data.get("task_status", "")
+    video_url = ""
+    if status == "succeed":
+        videos = data.get("task_result", {}).get("videos", [])
+        if videos and isinstance(videos[0], dict):
+            video_url = videos[0].get("url", "")
+    return {"status": status, "video_url": video_url}

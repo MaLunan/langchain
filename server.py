@@ -121,6 +121,17 @@ class VideoRequest(BaseModel):
         description="生成模式：仅支持 avatar（数字人口播）",
         pattern="^avatar$",
     )
+    provider: str = Field(
+        default="kling",
+        description="数字人服务商：kling（可灵）或 baidu（百度云晓灵）",
+        pattern="^(kling|baidu)$",
+    )
+
+
+class VideoPatchRequest(BaseModel):
+    video_url: str = Field(default="", description="直接写入视频 URL（与 task_id 二选一）")
+    task_id: str   = Field(default="", description="任务 ID，服务端按 provider 查询结果后写入")
+    provider: str  = Field(default="", description="覆盖 state.video_provider，kling 或 baidu")
 
 
 class WorkflowStatusResponse(BaseModel):
@@ -137,6 +148,7 @@ class WorkflowStatusResponse(BaseModel):
     video_mode: str
     video_status: str
     video_error: str | None = None
+    video_provider: str = "kling"
 
 
 class WorkflowSessionInfo(BaseModel):
@@ -147,6 +159,7 @@ class WorkflowSessionInfo(BaseModel):
     video_mode: str
     video_url: str | None = None
     updated_at: str | None = None
+    video_provider: str = "kling"
 
 
 def _get_state(request: Request, session_id: str):
@@ -183,7 +196,9 @@ def _run_avatar_video_job(store_fn, session_id: str) -> None:
 
         image_path = Path(state.avatar_image_path or "")
         audio_path = Path(state.audio_path or "")
-        video_url = generate_avatar_video(image_path, audio_path)
+        prompt = os.getenv("KLING_AVATAR_PROMPT", "").strip() or None
+        mode   = os.getenv("KLING_AVATAR_MODE", "std").strip() or "std"
+        video_url = generate_avatar_video(image_path, audio_path, prompt=prompt, mode=mode)
 
         state = store_fn(session_id)
         state.video_url = video_url
@@ -199,6 +214,78 @@ def _run_avatar_video_job(store_fn, session_id: str) -> None:
             state.video_error = str(e)
             state.video_mode = "avatar"
             state.current_step = WorkflowStep.VIDEO_FAILED
+            save_workflow(store_fn, state)
+        except Exception:
+            pass
+
+
+def _run_baidu_avatar_video_job(store_fn, session_id: str) -> None:
+    """
+    后台调用百度云数字人生成口播视频，将结果写回工作流存储。
+
+    重试逻辑：
+    - 若 state.baidu_task_id 已存在（上次超时），跳过提交直接接着轮询，不重复扣费。
+    - 若没有 task_id（首次或文本/音频已更换），重新上传 COS + 提交任务。
+    """
+    from baidu_dh_service import poll_task, submit_job, verify_image
+    from cos_service import upload_file
+
+    _POLL_TIMEOUT = 1800  # 30 分钟，覆盖较长音频场景
+
+    try:
+        state = store_fn(session_id)
+        state.video_status = "processing"
+        state.video_error = None
+        state.video_provider = "baidu"
+        state.video_mode = "avatar"
+        state.current_step = WorkflowStep.VIDEO_PENDING
+        save_workflow(store_fn, state)
+
+        task_id = state.baidu_task_id
+
+        if not task_id:
+            # ── 首次提交：上传 COS → 校验图片 → 提交任务 ──
+            image_path = Path(state.avatar_image_path or "")
+            audio_path = Path(state.audio_path or "")
+
+            image_url = upload_file(
+                image_path,
+                f"digital-human/{session_id}/avatar{image_path.suffix}",
+            )
+            audio_url = upload_file(
+                audio_path,
+                f"digital-human/{session_id}/audio{audio_path.suffix}",
+            )
+
+            verify_image(image_url)
+            task_id = submit_job(image_url, audio_url)
+
+            # 持久化 task_id，超时后重试可直接接着轮询
+            state = store_fn(session_id)
+            state.baidu_task_id = task_id
+            save_workflow(store_fn, state)
+
+        # ── 轮询结果 ──
+        video_url = poll_task(task_id, timeout=_POLL_TIMEOUT)
+
+        state = store_fn(session_id)
+        state.video_url = video_url
+        state.video_status = "succeed"
+        state.video_error = None
+        state.baidu_task_id = None   # 任务完成后清空
+        state.video_provider = "baidu"
+        state.video_mode = "avatar"
+        state.current_step = WorkflowStep.VIDEO_DONE
+        save_workflow(store_fn, state)
+    except Exception as e:
+        try:
+            state = store_fn(session_id)
+            state.video_status = "failed"
+            state.video_error = str(e)
+            state.video_provider = "baidu"
+            state.video_mode = "avatar"
+            state.current_step = WorkflowStep.VIDEO_FAILED
+            # baidu_task_id 保留，下次重试可接着轮询
             save_workflow(store_fn, state)
         except Exception:
             pass
@@ -289,6 +376,7 @@ def workflow_rewrite(session_id: str, body: RewriteRequest, request: Request):
     state.video_status = ""
     state.video_error = None
     state.video_mode = "avatar"
+    state.baidu_task_id = None
     state.current_step = WorkflowStep.REWRITTEN
     save_workflow(request.app.state.workflow_store, state)
     return RewriteResponse(session_id=session_id, rewritten_text=rewritten)
@@ -304,6 +392,7 @@ def workflow_confirm(session_id: str, body: ConfirmRequest, request: Request):
     state.video_status = ""
     state.video_error = None
     state.video_mode = "avatar"
+    state.baidu_task_id = None
     state.current_step = WorkflowStep.CONFIRMED
     save_workflow(request.app.state.workflow_store, state)
     return ConfirmResponse(session_id=session_id, final_text=state.final_text)
@@ -405,14 +494,87 @@ def workflow_video(
     if not image_path.exists():
         raise HTTPException(status_code=500, detail=f"数字人图片不存在：{image_path}")
 
+    provider = (body.provider if body else None) or "kling"
     state.video_mode = "avatar"
+    state.video_provider = provider
     state.video_status = "queued"
     state.video_error = None
     state.video_url = None
     state.current_step = WorkflowStep.VIDEO_PENDING
     save_workflow(request.app.state.workflow_store, state)
-    background_tasks.add_task(_run_avatar_video_job, request.app.state.workflow_store, session_id)
+
+    if provider == "baidu":
+        background_tasks.add_task(_run_baidu_avatar_video_job, request.app.state.workflow_store, session_id)
+    else:
+        background_tasks.add_task(_run_avatar_video_job, request.app.state.workflow_store, session_id)
+
     return VideoResponse(session_id=session_id, video_status="queued")
+
+
+@app.post("/workflow/{session_id}/video-patch", response_model=VideoResponse, tags=["workflow"])
+def workflow_video_patch(session_id: str, body: VideoPatchRequest, request: Request):
+    """
+    手动补录视频结果。适用于：轮询超时但任务已在云端完成的情况（可灵 / 百度云）。
+
+    - 传 video_url：直接写入指定 URL。
+    - 传 task_id：后端按 video_provider 查询对应平台任务状态，成功则写入 videoUrl。
+    - 两者都传时 video_url 优先。
+    """
+    state = _get_state(request, session_id)
+
+    video_url = body.video_url.strip()
+
+    if not video_url and body.task_id.strip():
+        task_id = body.task_id.strip()
+        provider = (body.provider.strip() or state.video_provider or "kling").lower()
+
+        if provider == "baidu":
+            from baidu_dh_service import BaiduDHAPIError, _get, _QUERY_PATH
+            try:
+                data = _get(_QUERY_PATH, {"taskId": task_id})
+            except BaiduDHAPIError as e:
+                raise HTTPException(status_code=502, detail=f"查询百度任务失败：{e}") from e
+            result = data.get("result") or {}
+            status = result.get("status", "")
+            if status == "SUCCESS":
+                video_url = result.get("videoUrl", "")
+            elif status == "FAILED":
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"百度任务已失败 code={result.get('failedCode')}: {result.get('failedMessage')}",
+                )
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"百度任务尚未完成，当前状态：{status}，请稍后再试。",
+                )
+        else:  # kling
+            from kling_service import KlingAPIError, query_avatar_task
+            try:
+                result = query_avatar_task(task_id)
+            except KlingAPIError as e:
+                raise HTTPException(status_code=502, detail=f"查询可灵任务失败：{e}") from e
+            status = result.get("status", "")
+            if status == "succeed":
+                video_url = result.get("video_url", "")
+            elif status in ("failed", "cancelled"):
+                raise HTTPException(status_code=422, detail=f"可灵任务已失败，状态：{status}")
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"可灵任务尚未完成，当前状态：{status}，请稍后再试。",
+                )
+
+    if not video_url:
+        raise HTTPException(status_code=422, detail="请提供 video_url 或 task_id。")
+
+    state.video_url = video_url
+    state.video_status = "succeed"
+    state.video_error = None
+    state.baidu_task_id = None
+    state.current_step = WorkflowStep.VIDEO_DONE
+    save_workflow(request.app.state.workflow_store, state)
+    return VideoResponse(session_id=session_id, video_status="succeed", video_url=video_url)
 
 
 @app.get("/workflow/{session_id}/status", response_model=WorkflowStatusResponse, tags=["workflow"])
@@ -433,6 +595,7 @@ def workflow_status(session_id: str, request: Request):
         video_mode=state.video_mode or "avatar",
         video_status=_video_status(state),
         video_error=state.video_error,
+        video_provider=state.video_provider or "kling",
     )
 
 

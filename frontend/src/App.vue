@@ -256,8 +256,29 @@
         <span class="badge">步骤 5</span>
       </div>
 
+      <!-- 服务商选择 -->
+      <template v-if="!videoUrl">
+        <div class="input-group">
+          <label>数字人服务商</label>
+          <div class="tabs">
+            <button
+              class="tab-btn"
+              :class="{ active: videoProvider === 'kling' }"
+              :disabled="videoStatus === 'queued' || videoStatus === 'processing'"
+              @click="videoProvider = 'kling'"
+            >⚡ 可灵</button>
+            <button
+              class="tab-btn"
+              :class="{ active: videoProvider === 'baidu' }"
+              :disabled="videoStatus === 'queued' || videoStatus === 'processing'"
+              @click="videoProvider = 'baidu'"
+            >🔵 百度云</button>
+          </div>
+        </div>
+      </template>
+
       <template v-if="videoUrl">
-        <div class="alert alert-success">🎉 视频生成成功！</div>
+        <div class="alert alert-success">🎉 视频生成成功！（服务商：{{ videoProvider === 'baidu' ? '百度云' : '可灵' }}）</div>
         <video
           class="video-preview"
           :src="videoUrl"
@@ -271,25 +292,59 @@
       </template>
       <template v-else>
         <div v-if="videoStatus === 'queued' || videoStatus === 'processing'" class="alert alert-info">
-          ⏳ 视频正在后台生成，页面会自动刷新结果，可以先保持页面打开。
+          ⏳ 视频正在后台生成，可点击下方"刷新状态"按钮查询最新进度。
         </div>
         <div v-else-if="videoStatus === 'failed'" class="alert alert-error">
-          生成失败：{{ videoError || '可灵未返回明确错误' }}
+          生成失败：{{ videoError || '服务未返回明确错误信息' }}
         </div>
+        <!-- 失败时显示补录区（轮询超时任务可能仍在云端运行） -->
+        <template v-if="videoStatus === 'failed'">
+          <div class="input-group" style="margin-top:8px">
+            <label>{{ videoProvider === 'kling' ? '补录可灵 task_id' : '补录百度云 task_id' }}（任务超时后用此查询实际结果）</label>
+            <div style="display:flex;gap:8px">
+              <input
+                v-model="patchTaskId"
+                type="text"
+                :placeholder="videoProvider === 'kling' ? '888509099301298195' : 'img-xxxxxxxxxxxxxxxx'"
+                style="flex:1"
+              />
+              <button
+                class="btn btn-primary"
+                :disabled="patchLoading || !patchTaskId.trim()"
+                @click="handleVideoPatch"
+              >
+                <span v-if="patchLoading" class="spinner"></span>
+                <span>{{ patchLoading ? '查询中…' : '查询并补录' }}</span>
+              </button>
+            </div>
+          </div>
+        </template>
         <div class="alert alert-info">
           ⚡ 数字人口播生成通常需要 1-3 分钟，提交任务后会异步处理，避免接口超时。
         </div>
-        <div class="alert alert-info" style="margin-top:0">
-          ⚙️ 需要在 .env 中配置 KLING_ACCESS_KEY_ID / KLING_ACCESS_KEY_SECRET
+        <div v-if="videoProvider === 'kling'" class="alert alert-info" style="margin-top:0">
+          ⚙️ 可灵：需要在 .env 中配置 KLING_ACCESS_KEY_ID / KLING_ACCESS_KEY_SECRET
+        </div>
+        <div v-else class="alert alert-info" style="margin-top:0">
+          ⚙️ 百度云：需要在 .env 中配置 BAIDU_DH_APP_ID / BAIDU_DH_APP_KEY / COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET / COS_REGION
         </div>
       </template>
 
       <div class="btn-row">
         <button class="btn btn-outline" @click="currentStep = 3">← 返回</button>
         <button
-          v-if="!videoUrl"
+          v-if="videoStatus === 'queued' || videoStatus === 'processing'"
+          class="btn btn-outline"
+          :disabled="refreshLoading"
+          @click="handleRefreshVideoStatus"
+        >
+          <span v-if="refreshLoading" class="spinner"></span>
+          <span>{{ refreshLoading ? '查询中…' : '刷新状态' }}</span>
+        </button>
+        <button
+          v-if="!videoUrl && videoStatus !== 'queued' && videoStatus !== 'processing'"
           class="btn btn-primary"
-          :disabled="loading || videoStatus === 'queued' || videoStatus === 'processing'"
+          :disabled="loading"
           @click="handleVideo"
         >
           <span v-if="loading" class="spinner"></span>
@@ -319,6 +374,7 @@ import {
   generateVideo,
   listSessions,
   getStatus,
+  patchVideoResult,
 } from './api/workflow.js'
 
 const STEPS = [
@@ -412,7 +468,6 @@ function clearDerivedMedia() {
   videoUrl.value = ''
   videoStatus.value = ''
   videoError.value = ''
-  stopVideoPolling()
 }
 
 function resetAvatarImage() {
@@ -454,14 +509,17 @@ const audioUrl      = ref('')
 const videoUrl      = ref('')
 const videoStatus   = ref('')
 const videoError    = ref('')
+const videoProvider = ref('kling')   // 'kling' | 'baidu'
+const patchTaskId   = ref('')
+const patchLoading  = ref(false)
 const avatarImageFile = ref(null)
 const avatarImagePath = ref('')
 const avatarPreviewUrl = ref('')
 const taskSessions   = ref([])
 const selectedSessionId = ref('')
 const sessionLoading = ref(false)
+const refreshLoading = ref(false)
 let restoringSession = false
-let videoPollTimer = null
 
 onMounted(async () => {
   try {
@@ -480,9 +538,6 @@ watch(editableText, (nextText) => {
   }
 })
 
-onUnmounted(() => {
-  stopVideoPolling()
-})
 
 // ── 文件选择 ─────────────────────────────────────────────
 function onFileChange(e) {
@@ -505,7 +560,6 @@ function onAvatarImageChange(e) {
   videoUrl.value = ''
   videoStatus.value = ''
   videoError.value = ''
-  stopVideoPolling()
 }
 
 function formatTaskOption(task) {
@@ -555,6 +609,10 @@ function applyWorkflowStatus(status) {
   videoUrl.value = status.video_url || ''
   videoStatus.value = status.video_status || (status.video_url ? 'succeed' : '')
   videoError.value = status.video_error || ''
+  videoProvider.value = status.video_provider || 'kling'
+  // 从超时错误信息里提取 task_id（可灵/百度），方便一键补录
+  const tidMatch = (status.video_error || '').match(/task_id=([\w-]+)/)
+  patchTaskId.value = tidMatch ? tidMatch[1] : ''
   avatarPreviewUrl.value = status.avatar_image_url || ''
   avatarImageFile.value = null
   avatarImagePath.value = status.avatar_image_url || (status.avatar_image_ready ? 'saved' : '')
@@ -571,11 +629,6 @@ async function loadSelectedSession() {
   try {
     const status = await getStatus(selectedSessionId.value)
     applyWorkflowStatus(status)
-    if (isVideoPendingStatus(status)) {
-      startVideoPolling()
-    } else {
-      stopVideoPolling()
-    }
   } catch (e) {
     error.value = e.message
   } finally {
@@ -583,37 +636,6 @@ async function loadSelectedSession() {
   }
 }
 
-function isVideoPendingStatus(status) {
-  return status.video_status === 'queued' || status.video_status === 'processing'
-}
-
-function stopVideoPolling() {
-  if (videoPollTimer) {
-    clearInterval(videoPollTimer)
-    videoPollTimer = null
-  }
-}
-
-function startVideoPolling() {
-  stopVideoPolling()
-  if (!sessionId.value) return
-  videoPollTimer = setInterval(pollVideoStatus, 5000)
-}
-
-async function pollVideoStatus() {
-  if (!sessionId.value) return
-  try {
-    const status = await getStatus(sessionId.value)
-    applyWorkflowStatus(status)
-    if (!isVideoPendingStatus(status)) {
-      stopVideoPolling()
-      await refreshSessions()
-    }
-  } catch (e) {
-    error.value = e.message
-    stopVideoPolling()
-  }
-}
 
 // ── 步骤处理函数 ─────────────────────────────────────────
 async function handleExtract() {
@@ -787,18 +809,53 @@ async function handleVideo() {
   try {
     await ensureAvatarAudio()
     await ensureAvatarImageUploaded()
-    const res = await generateVideo(sessionId.value)
+    const res = await generateVideo(sessionId.value, videoProvider.value)
     videoStatus.value = res.video_status || ''
     videoError.value = res.video_error || ''
     videoUrl.value = res.video_url || ''
-    if (videoStatus.value === 'queued' || videoStatus.value === 'processing') {
-      startVideoPolling()
-    }
     await refreshSessions()
   } catch (e) {
     error.value = e.message
   } finally {
     loading.value = false
+  }
+}
+
+async function handleRefreshVideoStatus() {
+  if (!sessionId.value) return
+  refreshLoading.value = true
+  error.value = ''
+  try {
+    const status = await getStatus(sessionId.value)
+    applyWorkflowStatus(status)
+    if (status.video_url || status.video_status === 'succeed') {
+      await refreshSessions()
+    }
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    refreshLoading.value = false
+  }
+}
+
+async function handleVideoPatch() {
+  error.value = ''
+  if (!patchTaskId.value.trim()) {
+    error.value = '请填写百度云 task_id'
+    return
+  }
+  patchLoading.value = true
+  try {
+    const res = await patchVideoResult(sessionId.value, { taskId: patchTaskId.value.trim(), provider: videoProvider.value })
+    videoUrl.value  = res.video_url || ''
+    videoStatus.value = 'succeed'
+    videoError.value  = ''
+    patchTaskId.value = ''
+    await refreshSessions()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    patchLoading.value = false
   }
 }
 
@@ -815,8 +872,9 @@ function reset() {
   videoUrl.value       = ''
   videoStatus.value    = ''
   videoError.value     = ''
+  videoProvider.value  = 'kling'
+  patchTaskId.value    = ''
   resetAvatarImage()
-  stopVideoPolling()
   error.value          = ''
 }
 </script>
