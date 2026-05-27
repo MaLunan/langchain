@@ -404,8 +404,10 @@ def storyboard_merge(session_id: str, request: Request):
                 status_code=409,
                 detail=f"以下 scene 尚未完成，无法合并：{not_ready}",
             )
-        if sb.merged_video_url:
-            return MergeResponse(session_id=session_id, merged_video_url=sb.merged_video_url)
+        if sb.merged_video_url or sb.status in ("merging", "done"):
+            if sb.merged_video_url:
+                return MergeResponse(session_id=session_id, merged_video_url=sb.merged_video_url)
+            raise HTTPException(status_code=409, detail="视频合并正在进行中，请稍后再试")
         # Set sentinel to prevent a concurrent request from also starting the merge
         sb.status = "merging"
         storyboard_store.save(sb)
