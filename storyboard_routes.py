@@ -85,7 +85,7 @@ def _get_storyboard(request: Request, session_id: str) -> StoryboardSession:
     return store.get(session_id)
 
 
-def _scene_to_info(scene: SceneState, generated_dir: Path) -> SceneInfo:
+def _scene_to_info(scene: SceneState) -> SceneInfo:
     image_url = None
     if scene.image_path and Path(scene.image_path).exists():
         image_url = f"/generated/{Path(scene.image_path).name}"
@@ -123,19 +123,22 @@ def _run_scene_job(
     Process one scene sequentially: image → audio → video.
     Errors are written to scene state; never raises.
     """
+    lock = storyboard_store.get_lock(session_id)
     sb = storyboard_store.get(session_id)
     scene = sb.scenes[scene_index]
 
     # ── Step 1: Generate illustration prompt + storyboard image ──
     try:
-        scene.image_status = "processing"
-        storyboard_store.save(sb)
+        with lock:
+            scene.image_status = "processing"
+            storyboard_store.save(sb)
 
         from image_gen_service import generate_illustration_prompt, generate_storyboard_image
 
         prompt = generate_illustration_prompt(scene.text, llm)
-        scene.illustration_prompt = prompt
-        storyboard_store.save(sb)
+        with lock:
+            scene.illustration_prompt = prompt
+            storyboard_store.save(sb)
 
         image_path = generated_dir / f"{session_id}_scene_{scene_index}.png"
         generate_storyboard_image(
@@ -143,40 +146,49 @@ def _run_scene_job(
             prompt,
             image_path,
         )
-        scene.image_path = str(image_path)
-        scene.image_status = "succeed"
-        storyboard_store.save(sb)
+        with lock:
+            scene.image_path = str(image_path)
+            scene.image_status = "succeed"
+            storyboard_store.save(sb)
     except Exception as e:
-        scene.image_status = "failed"
-        scene.image_error = str(e)
-        scene.audio_status = "failed"
-        scene.audio_error = "图片生成失败，跳过音频步骤"
-        scene.video_status = "failed"
-        scene.video_error = "图片生成失败，跳过视频步骤"
-        storyboard_store.save(sb)
+        with lock:
+            scene.image_status = "failed"
+            scene.image_error = str(e)
+            scene.audio_status = "failed"
+            scene.audio_error = "图片生成失败，跳过音频步骤"
+            scene.video_status = "failed"
+            scene.video_error = "图片生成失败，跳过视频步骤"
+            storyboard_store.save(sb)
         return
 
     # ── Step 2: TTS audio ──────────────────────────────────────────
     try:
+        with lock:
+            scene.audio_status = "processing"
+            storyboard_store.save(sb)
+
         from tts_service import text_to_speech
 
         audio_path = generated_dir / f"{session_id}_scene_{scene_index}.mp3"
         text_to_speech(scene.text, audio_path)
-        scene.audio_path = str(audio_path)
-        scene.audio_status = "succeed"
-        storyboard_store.save(sb)
+        with lock:
+            scene.audio_path = str(audio_path)
+            scene.audio_status = "succeed"
+            storyboard_store.save(sb)
     except Exception as e:
-        scene.audio_status = "failed"
-        scene.audio_error = str(e)
-        scene.video_status = "failed"
-        scene.video_error = "音频生成失败，跳过视频步骤"
-        storyboard_store.save(sb)
+        with lock:
+            scene.audio_status = "failed"
+            scene.audio_error = str(e)
+            scene.video_status = "failed"
+            scene.video_error = "音频生成失败，跳过视频步骤"
+            storyboard_store.save(sb)
         return
 
     # ── Step 3: Kling Avatar video ────────────────────────────────
     try:
-        scene.video_status = "processing"
-        storyboard_store.save(sb)
+        with lock:
+            scene.video_status = "processing"
+            storyboard_store.save(sb)
 
         from kling_service import generate_avatar_video
 
@@ -184,13 +196,15 @@ def _run_scene_job(
             Path(scene.image_path),
             Path(scene.audio_path),
         )
-        scene.video_url = video_url
-        scene.video_status = "succeed"
-        storyboard_store.save(sb)
+        with lock:
+            scene.video_url = video_url
+            scene.video_status = "succeed"
+            storyboard_store.save(sb)
     except Exception as e:
-        scene.video_status = "failed"
-        scene.video_error = str(e)
-        storyboard_store.save(sb)
+        with lock:
+            scene.video_status = "failed"
+            scene.video_error = str(e)
+            storyboard_store.save(sb)
 
 
 # ── Background job: all scenes concurrently ───────────────────────────────────
@@ -229,7 +243,7 @@ def _run_all_scenes_job(
 
     sb = storyboard_store.get(session_id)
     all_done = all(s.video_status == "succeed" for s in sb.scenes)
-    sb.status = "done" if all_done else "processing"
+    sb.status = "done" if all_done else "failed"
     storyboard_store.save(sb)
 
 
@@ -255,10 +269,12 @@ def storyboard_init(session_id: str, request: Request):
         raise HTTPException(status_code=422, detail="文案拆分结果为空，请检查 final_text 内容。")
 
     store: InMemoryStoryboardStore = request.app.state.storyboard_store
-    sb = create_storyboard(store, session_id, state.avatar_image_path, texts)
+    try:
+        sb = create_storyboard(store, session_id, state.avatar_image_path, texts)
+    except KeyError:
+        raise HTTPException(status_code=409, detail=f"分镜会话已存在：{session_id}，请使用 /status 查看当前状态。")
 
-    generated_dir: Path = request.app.state.generated_dir
-    scenes_info = [_scene_to_info(s, generated_dir) for s in sb.scenes]
+    scenes_info = [_scene_to_info(s) for s in sb.scenes]
     return StoryboardInitResponse(
         session_id=session_id,
         scene_count=len(sb.scenes),
@@ -309,7 +325,6 @@ def storyboard_generate_all(
 def storyboard_status(session_id: str, request: Request):
     """Return full StoryboardSession status including all scenes."""
     sb = _get_storyboard(request, session_id)
-    generated_dir: Path = request.app.state.generated_dir
 
     succeed_count = sum(1 for s in sb.scenes if s.video_status == "succeed")
     failed_count = sum(1 for s in sb.scenes if s.video_status == "failed")
@@ -320,7 +335,7 @@ def storyboard_status(session_id: str, request: Request):
         scene_count=len(sb.scenes),
         succeed_count=succeed_count,
         failed_count=failed_count,
-        scenes=[_scene_to_info(s, generated_dir) for s in sb.scenes],
+        scenes=[_scene_to_info(s) for s in sb.scenes],
         merged_video_url=sb.merged_video_url,
     )
 

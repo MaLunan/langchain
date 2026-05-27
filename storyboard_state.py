@@ -1,6 +1,7 @@
 # storyboard_state.py
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -37,6 +38,12 @@ class StoryboardSession:
 class InMemoryStoryboardStore:
     def __init__(self) -> None:
         self._store: dict[str, StoryboardSession] = {}
+        self._locks: dict[str, threading.Lock] = {}
+
+    def get_lock(self, session_id: str) -> threading.Lock:
+        if session_id not in self._locks:
+            self._locks[session_id] = threading.Lock()
+        return self._locks[session_id]
 
     def get(self, session_id: str) -> StoryboardSession:
         if session_id not in self._store:
