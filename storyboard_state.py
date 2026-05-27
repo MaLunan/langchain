@@ -44,6 +44,8 @@ class InMemoryStoryboardStore:
         return self._store[session_id]
 
     def create(self, session: StoryboardSession) -> StoryboardSession:
+        if session.session_id in self._store:
+            raise KeyError(f"StoryboardSession already exists: {session.session_id}")
         self._store[session.session_id] = session
         return session
 

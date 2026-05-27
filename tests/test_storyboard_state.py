@@ -4,8 +4,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from storyboard_state import (
     InMemoryStoryboardStore,
     create_storyboard,
-    SceneState,
-    StoryboardSession,
 )
 
 
@@ -38,8 +36,19 @@ def test_store_save_and_retrieve():
     store.save(sb)
 
     loaded = store.get("sess-2")
+    assert loaded is sb  # in-memory store returns same object reference
     assert loaded.scenes[0].video_status == "succeed"
     assert loaded.scenes[0].video_url == "https://example.com/video.mp4"
+
+
+def test_store_create_raises_on_duplicate():
+    store = InMemoryStoryboardStore()
+    create_storyboard(store, "dup", "/tmp/ref.png", ["句子。"])
+    try:
+        create_storyboard(store, "dup", "/tmp/ref.png", ["另一句。"])
+        assert False, "should raise KeyError"
+    except KeyError:
+        pass
 
 
 def test_store_exists():
