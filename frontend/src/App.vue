@@ -1067,6 +1067,14 @@ function exitStoryboardMode() {
 }
 
 function reset() {
+  exitStoryboardMode()
+  storyboardScenes.value = []
+  storyboardStatus.value = ''
+  storyboardSuccessCount.value = 0
+  storyboardFailedCount.value = 0
+  storyboardMergedUrl.value = ''
+  storyboardMerging.value = false
+  storyboardLoading.value = false
   currentStep.value    = 0
   sessionId.value      = ''
   selectedSessionId.value = ''

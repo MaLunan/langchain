@@ -356,6 +356,13 @@ def storyboard_scene_retry(
     if scene_index < 0 or scene_index >= len(sb.scenes):
         raise HTTPException(status_code=404, detail=f"scene_index {scene_index} 不存在")
 
+    scene = sb.scenes[scene_index]
+    if scene.video_status == "processing" or scene.image_status == "processing":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scene {scene_index} 正在生成中，请等待当前任务完成再重试。",
+        )
+
     storyboard_store: InMemoryStoryboardStore = request.app.state.storyboard_store
     lock = storyboard_store.get_lock(session_id)
     with lock:
