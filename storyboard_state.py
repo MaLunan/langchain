@@ -41,9 +41,7 @@ class InMemoryStoryboardStore:
         self._locks: dict[str, threading.Lock] = {}
 
     def get_lock(self, session_id: str) -> threading.Lock:
-        if session_id not in self._locks:
-            self._locks[session_id] = threading.Lock()
-        return self._locks[session_id]
+        return self._locks.setdefault(session_id, threading.Lock())
 
     def get(self, session_id: str) -> StoryboardSession:
         if session_id not in self._store:

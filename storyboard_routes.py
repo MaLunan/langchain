@@ -27,6 +27,10 @@ from storyboard_state import (
     create_storyboard,
 )
 from text_splitter import split_into_scenes
+from image_gen_service import generate_illustration_prompt, generate_storyboard_image
+from tts_service import text_to_speech
+from kling_service import generate_avatar_video
+from video_merge_service import download_and_merge
 
 router = APIRouter(prefix="/workflow/{session_id}/storyboard", tags=["storyboard"])
 
@@ -133,8 +137,6 @@ def _run_scene_job(
             scene.image_status = "processing"
             storyboard_store.save(sb)
 
-        from image_gen_service import generate_illustration_prompt, generate_storyboard_image
-
         prompt = generate_illustration_prompt(scene.text, llm)
         with lock:
             scene.illustration_prompt = prompt
@@ -167,8 +169,6 @@ def _run_scene_job(
             scene.audio_status = "processing"
             storyboard_store.save(sb)
 
-        from tts_service import text_to_speech
-
         audio_path = generated_dir / f"{session_id}_scene_{scene_index}.mp3"
         text_to_speech(scene.text, audio_path)
         with lock:
@@ -189,8 +189,6 @@ def _run_scene_job(
         with lock:
             scene.video_status = "processing"
             storyboard_store.save(sb)
-
-        from kling_service import generate_avatar_video
 
         video_url = generate_avatar_video(
             Path(scene.image_path),
@@ -219,9 +217,11 @@ def _run_all_scenes_job(
     Run all scenes in parallel (max 3 concurrent) using ThreadPoolExecutor.
     Updates StoryboardSession.status when done.
     """
-    sb = storyboard_store.get(session_id)
-    sb.status = "processing"
-    storyboard_store.save(sb)
+    lock = storyboard_store.get_lock(session_id)
+    with lock:
+        sb = storyboard_store.get(session_id)
+        sb.status = "processing"
+        storyboard_store.save(sb)
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
@@ -241,10 +241,11 @@ def _run_all_scenes_job(
             except Exception:
                 pass  # errors already written to scene state
 
-    sb = storyboard_store.get(session_id)
-    all_done = all(s.video_status == "succeed" for s in sb.scenes)
-    sb.status = "done" if all_done else "failed"
-    storyboard_store.save(sb)
+    with lock:
+        sb = storyboard_store.get(session_id)
+        all_done = all(s.video_status == "succeed" for s in sb.scenes)
+        sb.status = "done" if all_done else "failed"
+        storyboard_store.save(sb)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -292,24 +293,27 @@ def storyboard_generate_all(
     Start background processing for all scenes (image → audio → video).
     Returns immediately; poll /status for progress.
     """
-    sb = _get_storyboard(request, session_id)
-    if sb.status == "processing":
-        return {"session_id": session_id, "status": "processing", "message": "已在处理中"}
-
     llm = request.app.state.router_llm
     generated_dir: Path = request.app.state.generated_dir
     storyboard_store: InMemoryStoryboardStore = request.app.state.storyboard_store
 
-    # Reset failed scenes so they get retried
-    for scene in sb.scenes:
-        if scene.video_status != "succeed":
-            scene.image_status = "pending"
-            scene.image_error = None
-            scene.audio_status = "pending"
-            scene.audio_error = None
-            scene.video_status = "pending"
-            scene.video_error = None
-    storyboard_store.save(sb)
+    lock = storyboard_store.get_lock(session_id)
+    with lock:
+        sb = _get_storyboard(request, session_id)
+        if sb.status == "processing":
+            return {"session_id": session_id, "status": "processing", "message": "已在处理中"}
+
+        # Reset non-succeed scenes so they get retried
+        for scene in sb.scenes:
+            if scene.video_status != "succeed":
+                scene.image_status = "pending"
+                scene.image_error = None
+                scene.audio_status = "pending"
+                scene.audio_error = None
+                scene.video_status = "pending"
+                scene.video_error = None
+        sb.status = "processing"
+        storyboard_store.save(sb)
 
     background_tasks.add_task(
         _run_all_scenes_job,
@@ -353,17 +357,19 @@ def storyboard_scene_retry(
         raise HTTPException(status_code=404, detail=f"scene_index {scene_index} 不存在")
 
     storyboard_store: InMemoryStoryboardStore = request.app.state.storyboard_store
-    scene = sb.scenes[scene_index]
-    scene.image_status = "pending"
-    scene.image_error = None
-    scene.audio_status = "pending"
-    scene.audio_error = None
-    scene.video_status = "pending"
-    scene.video_error = None
-    scene.image_path = None
-    scene.audio_path = None
-    scene.video_url = None
-    storyboard_store.save(sb)
+    lock = storyboard_store.get_lock(session_id)
+    with lock:
+        scene = sb.scenes[scene_index]
+        scene.image_status = "pending"
+        scene.image_error = None
+        scene.audio_status = "pending"
+        scene.audio_error = None
+        scene.video_status = "pending"
+        scene.video_error = None
+        scene.image_path = None
+        scene.audio_path = None
+        scene.video_url = None
+        storyboard_store.save(sb)
 
     llm = request.app.state.router_llm
     generated_dir: Path = request.app.state.generated_dir
@@ -386,34 +392,39 @@ def storyboard_merge(session_id: str, request: Request):
 
     Precondition: all scenes must have video_status == 'succeed'.
     """
-    sb = _get_storyboard(request, session_id)
-
-    not_ready = [
-        s.index for s in sb.scenes if s.video_status != "succeed"
-    ]
-    if not_ready:
-        raise HTTPException(
-            status_code=409,
-            detail=f"以下 scene 尚未完成，无法合并：{not_ready}",
-        )
-
-    if sb.merged_video_url:
-        return MergeResponse(session_id=session_id, merged_video_url=sb.merged_video_url)
-
-    from video_merge_service import download_and_merge
-
     generated_dir: Path = request.app.state.generated_dir
-    video_urls = [s.video_url for s in sb.scenes]
+    storyboard_store: InMemoryStoryboardStore = request.app.state.storyboard_store
+    lock = storyboard_store.get_lock(session_id)
+
+    with lock:
+        sb = _get_storyboard(request, session_id)
+        not_ready = [s.index for s in sb.scenes if s.video_status != "succeed"]
+        if not_ready:
+            raise HTTPException(
+                status_code=409,
+                detail=f"以下 scene 尚未完成，无法合并：{not_ready}",
+            )
+        if sb.merged_video_url:
+            return MergeResponse(session_id=session_id, merged_video_url=sb.merged_video_url)
+        # Set sentinel to prevent a concurrent request from also starting the merge
+        sb.status = "merging"
+        storyboard_store.save(sb)
+        video_urls = [s.video_url for s in sb.scenes]
 
     try:
         merged_path = download_and_merge(video_urls, session_id, generated_dir)
     except Exception as e:
+        with lock:
+            sb = storyboard_store.get(session_id)
+            sb.status = "failed"
+            storyboard_store.save(sb)
         raise HTTPException(status_code=500, detail=f"视频合并失败：{e}") from e
 
-    storyboard_store: InMemoryStoryboardStore = request.app.state.storyboard_store
-    sb.merged_video_path = str(merged_path)
-    sb.merged_video_url = f"/generated/{merged_path.name}"
-    sb.status = "done"
-    storyboard_store.save(sb)
+    with lock:
+        sb = storyboard_store.get(session_id)
+        sb.merged_video_path = str(merged_path)
+        sb.merged_video_url = f"/generated/{merged_path.name}"
+        sb.status = "done"
+        storyboard_store.save(sb)
 
     return MergeResponse(session_id=session_id, merged_video_url=sb.merged_video_url)
