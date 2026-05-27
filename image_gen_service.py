@@ -84,6 +84,9 @@ def _gpt_image_edit(image_path: Path, prompt: str, output_path: Path) -> Path:
     """Call OpenAI images.edit (gpt-image-1) with the reference image."""
     import openai
 
+    if not image_path.exists():
+        raise FileNotFoundError(f"参考图不存在：{image_path}")
+
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise EnvironmentError("OPENAI_API_KEY 未配置，无法使用 GPT Image 2")
@@ -101,7 +104,7 @@ def _gpt_image_edit(image_path: Path, prompt: str, output_path: Path) -> Path:
         )
 
     img_data = response.data[0]
-    if img_data.b64_json:
+    if img_data.b64_json is not None:
         img_bytes = base64.b64decode(img_data.b64_json)
     elif img_data.url:
         import requests as req
@@ -116,14 +119,17 @@ def _gpt_image_edit(image_path: Path, prompt: str, output_path: Path) -> Path:
     return output_path
 
 
-def _doubao_image_generate(image_path: Path, prompt: str, output_path: Path) -> Path:
+def _doubao_image_generate(_image_path: Path, prompt: str, output_path: Path) -> Path:
     """
     Doubao (豆包 / ARK) text-to-image fallback.
     Uses OpenAI-compatible endpoint at ark.cn-beijing.volces.com.
     Enriches the prompt with a description of the reference image context.
     """
+    import logging
     import openai
     import requests as req
+
+    logging.warning("豆包兜底使用 text-to-image，参考图 %s 未被使用", _image_path)
 
     api_key = os.getenv("DOUBAO_API_KEY", "").strip()
     if not api_key:
@@ -152,7 +158,7 @@ def _doubao_image_generate(image_path: Path, prompt: str, output_path: Path) -> 
     )
 
     img_data = response.data[0]
-    if img_data.b64_json:
+    if img_data.b64_json is not None:
         img_bytes = base64.b64decode(img_data.b64_json)
     elif img_data.url:
         resp = req.get(img_data.url, timeout=60)
