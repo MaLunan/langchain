@@ -29,6 +29,8 @@ from workflow_state import (
     make_workflow_store,
     save_workflow,
 )
+from storyboard_state import make_storyboard_store
+from storyboard_routes import router as storyboard_router
 
 # 本地文件存储目录
 _BASE_DIR = Path(__file__).resolve().parent
@@ -44,6 +46,8 @@ async def lifespan(app: FastAPI):
     load_env()
     app.state.router_llm = build_moonshot_llm()
     app.state.workflow_store = make_workflow_store()
+    app.state.storyboard_store = make_storyboard_store()
+    app.state.generated_dir = GENERATED_DIR
     yield
 
 
@@ -57,6 +61,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(storyboard_router)
 
 
 @app.get("/health")
