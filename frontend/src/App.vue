@@ -242,10 +242,20 @@
           <span v-if="loading" class="spinner"></span>
           <span>{{ loading ? '生成中…' : '生成语音' }}</span>
         </button>
-        <button v-if="audioUrl" class="btn btn-primary" :disabled="loading" @click="proceedToVideoStep">
-          <span v-if="loading" class="spinner"></span>
-          <span>{{ loading ? '保存图片中…' : '下一步：生成视频 →' }}</span>
-        </button>
+        <template v-if="audioUrl">
+          <button class="btn btn-primary" :disabled="loading" @click="proceedToVideoStep">
+            <span v-if="loading" class="spinner"></span>
+            <span>{{ loading ? '保存图片中…' : '普通口播 →' }}</span>
+          </button>
+          <button
+            class="btn btn-success"
+            :disabled="storyboardLoading || !hasAvatarImage()"
+            @click="enterStoryboardMode"
+          >
+            <span v-if="storyboardLoading" class="spinner"></span>
+            <span>{{ storyboardLoading ? '初始化中…' : '🎬 分镜模式' }}</span>
+          </button>
+        </template>
       </div>
     </div>
 
@@ -354,6 +364,98 @@
       </div>
     </div>
 
+    <!-- ── 分镜模式面板 ─────────────────────────────────── -->
+    <div v-if="storyboardMode" class="card">
+      <div class="card-title">
+        <span>🎬 分镜模式</span>
+        <span class="badge">{{ storyboardSuccessCount }}/{{ storyboardScenes.length }} 完成</span>
+      </div>
+
+      <!-- 控制栏 -->
+      <div class="btn-row" style="margin-bottom:12px">
+        <button class="btn btn-outline" @click="exitStoryboardMode">← 退出分镜</button>
+        <button
+          class="btn btn-primary"
+          :disabled="storyboardLoading || storyboardStatus === 'processing'"
+          @click="handleGenerateAll"
+        >
+          <span v-if="storyboardStatus === 'processing'" class="spinner"></span>
+          <span>{{ storyboardStatus === 'processing' ? '生成中…' : '全部生成' }}</span>
+        </button>
+        <button
+          v-if="storyboardSuccessCount === storyboardScenes.length && storyboardScenes.length > 0"
+          class="btn btn-success"
+          :disabled="storyboardMerging || !!storyboardMergedUrl"
+          @click="handleMerge"
+        >
+          <span v-if="storyboardMerging" class="spinner"></span>
+          <span>{{ storyboardMerging ? '合并中…' : storyboardMergedUrl ? '已合并' : '合并视频' }}</span>
+        </button>
+      </div>
+
+      <!-- 合并结果 -->
+      <template v-if="storyboardMergedUrl">
+        <div class="alert alert-success">🎉 合并完成！</div>
+        <video class="video-preview" :src="storyboardMergedUrl" controls playsinline preload="metadata"></video>
+        <a :href="storyboardMergedUrl" target="_blank" rel="noopener" class="video-link">🎬 下载合并视频</a>
+      </template>
+
+      <!-- 场景列表 -->
+      <div
+        v-for="scene in storyboardScenes"
+        :key="scene.index"
+        style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:12px"
+      >
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <strong>场景 {{ scene.index + 1 }}</strong>
+          <span :style="{
+            color: scene.video_status === 'succeed' ? '#16a34a'
+                 : scene.video_status === 'failed'  ? '#dc2626'
+                 : '#d97706',
+            fontSize: '12px'
+          }">
+            {{ { pending:'等待', processing:'生成中…', succeed:'✓ 完成', failed:'✗ 失败' }[scene.video_status] || scene.video_status }}
+          </span>
+        </div>
+
+        <!-- 文案 -->
+        <div style="font-size:13px;color:#444;margin-bottom:8px;background:#f9f9f9;padding:6px 8px;border-radius:4px">
+          {{ scene.text }}
+        </div>
+
+        <!-- 分镜图 -->
+        <div v-if="scene.image_status === 'succeed' && scene.image_url" style="margin-bottom:8px">
+          <img :src="scene.image_url" alt="分镜图" style="max-width:100%;max-height:200px;border-radius:4px;border:1px solid #ddd" />
+        </div>
+        <div v-else-if="scene.image_status === 'failed'" style="font-size:12px;color:#dc2626;margin-bottom:4px">
+          图片失败：{{ scene.image_error }}
+        </div>
+
+        <!-- 音频 -->
+        <div v-if="scene.audio_status === 'succeed' && scene.audio_url" style="margin-bottom:8px">
+          <audio :src="scene.audio_url" controls style="width:100%"></audio>
+        </div>
+
+        <!-- 视频 -->
+        <div v-if="scene.video_status === 'succeed' && scene.video_url" style="margin-bottom:8px">
+          <video :src="scene.video_url" controls playsinline preload="metadata" style="max-width:100%;border-radius:4px"></video>
+        </div>
+        <div v-else-if="scene.video_status === 'failed'" style="font-size:12px;color:#dc2626;margin-bottom:4px">
+          视频失败：{{ scene.video_error }}
+        </div>
+
+        <!-- 重试按钮 -->
+        <button
+          v-if="scene.image_status === 'failed' || scene.video_status === 'failed'"
+          class="btn btn-outline"
+          style="font-size:12px;padding:4px 10px"
+          @click="handleRetryScene(scene.index)"
+        >
+          重试此场景
+        </button>
+      </div>
+    </div>
+
     <!-- 会话信息 -->
     <div v-if="sessionId" style="text-align:center;color:#bbb;font-size:11px;margin-top:4px">
       session: {{ sessionId }}
@@ -375,6 +477,11 @@ import {
   listSessions,
   getStatus,
   patchVideoResult,
+  initStoryboard,
+  generateAllScenes,
+  getStoryboardStatus,
+  retryScene,
+  mergeStoryboard,
 } from './api/workflow.js'
 
 const STEPS = [
@@ -521,12 +628,27 @@ const sessionLoading = ref(false)
 const refreshLoading = ref(false)
 let restoringSession = false
 
+// ── 分镜状态 ─────────────────────────────────────────────
+const storyboardMode    = ref(false)
+const storyboardLoading = ref(false)
+const storyboardScenes  = ref([])   // SceneInfo[]
+const storyboardStatus  = ref('')   // init/processing/done/failed
+const storyboardSuccessCount = ref(0)
+const storyboardFailedCount  = ref(0)
+const storyboardMergedUrl    = ref('')
+const storyboardMerging      = ref(false)
+let storyboardPollTimer = null
+
 onMounted(async () => {
   try {
     rewriteStyles.value = await fetchRewriteStyles()
     if (rewriteStyles.value.length) selectedStyle.value = rewriteStyles.value[0].style_id
   } catch { /* 后端未启动时静默失败 */ }
   await refreshSessions()
+})
+
+onUnmounted(() => {
+  stopStoryboardPolling()
 })
 
 watch(editableText, (nextText) => {
@@ -857,6 +979,91 @@ async function handleVideoPatch() {
   } finally {
     patchLoading.value = false
   }
+}
+
+// ── 分镜处理函数 ─────────────────────────────────────────
+async function enterStoryboardMode() {
+  error.value = ''
+  storyboardLoading.value = true
+  try {
+    await ensureAvatarImageUploaded()
+    const res = await initStoryboard(sessionId.value)
+    storyboardScenes.value = res.scenes
+    storyboardStatus.value = 'init'
+    storyboardSuccessCount.value = 0
+    storyboardFailedCount.value = 0
+    storyboardMergedUrl.value = ''
+    storyboardMode.value = true
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    storyboardLoading.value = false
+  }
+}
+
+async function handleGenerateAll() {
+  error.value = ''
+  storyboardLoading.value = true
+  try {
+    await generateAllScenes(sessionId.value)
+    startStoryboardPolling()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    storyboardLoading.value = false
+  }
+}
+
+function startStoryboardPolling() {
+  stopStoryboardPolling()
+  storyboardPollTimer = setInterval(async () => {
+    try {
+      const res = await getStoryboardStatus(sessionId.value)
+      storyboardScenes.value = res.scenes
+      storyboardStatus.value = res.status
+      storyboardSuccessCount.value = res.succeed_count
+      storyboardFailedCount.value = res.failed_count
+      storyboardMergedUrl.value = res.merged_video_url || ''
+      if (res.status !== 'processing') {
+        stopStoryboardPolling()
+      }
+    } catch { /* ignore polling errors */ }
+  }, 3000)
+}
+
+function stopStoryboardPolling() {
+  if (storyboardPollTimer) {
+    clearInterval(storyboardPollTimer)
+    storyboardPollTimer = null
+  }
+}
+
+async function handleRetryScene(sceneIndex) {
+  error.value = ''
+  try {
+    await retryScene(sessionId.value, sceneIndex)
+    startStoryboardPolling()
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+async function handleMerge() {
+  error.value = ''
+  storyboardMerging.value = true
+  try {
+    const res = await mergeStoryboard(sessionId.value)
+    storyboardMergedUrl.value = res.merged_video_url
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    storyboardMerging.value = false
+  }
+}
+
+function exitStoryboardMode() {
+  stopStoryboardPolling()
+  storyboardMode.value = false
 }
 
 function reset() {
