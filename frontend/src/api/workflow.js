@@ -81,3 +81,28 @@ export async function patchVideoResult(sessionId, { taskId = '', videoUrl = '', 
     provider,
   })
 }
+
+/** 分镜：拆分文案，创建分镜场景列表 */
+export async function initStoryboard(sessionId) {
+  return request('POST', `/workflow/${sessionId}/storyboard/init`)
+}
+
+/** 分镜：启动所有场景的后台生成任务 */
+export async function generateAllScenes(sessionId) {
+  return request('POST', `/workflow/${sessionId}/storyboard/generate-all`)
+}
+
+/** 分镜：查询整体状态和每个场景状态 */
+export async function getStoryboardStatus(sessionId) {
+  return request('GET', `/workflow/${sessionId}/storyboard/status`)
+}
+
+/** 分镜：重试指定场景（scene_index 从 0 开始） */
+export async function retryScene(sessionId, sceneIndex) {
+  return request('POST', `/workflow/${sessionId}/storyboard/scene/${sceneIndex}/retry`)
+}
+
+/** 分镜：合并所有场景视频，返回 merged_video_url */
+export async function mergeStoryboard(sessionId) {
+  return request('POST', `/workflow/${sessionId}/storyboard/merge`)
+}
